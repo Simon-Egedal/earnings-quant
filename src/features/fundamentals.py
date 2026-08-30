@@ -11,6 +11,7 @@ def safe_divide(numerator: float, denominator: float) -> float:
 
 
 def _growth(values: pd.Series, periods: int) -> float:
+    values = pd.to_numeric(values, errors="coerce").dropna()
     if len(values) <= periods:
         return np.nan
     return safe_divide(values.iloc[-1] - values.iloc[-1 - periods], abs(values.iloc[-1 - periods]))
@@ -101,11 +102,13 @@ def point_in_time_fundamentals(
     for metric in ("revenue", "eps_diluted", "operating_cash_flow", "free_cash_flow", "total_assets", "shares_outstanding"):
         if metric in visible:
             values = pd.to_numeric(visible[metric], errors="coerce")
+            valid_values = values.dropna()
+            output[f"{metric}_history_count"] = float(len(valid_values))
             output[f"{metric}_qoq"] = _growth(values, 1)
             output[f"{metric}_yoy"] = _growth(values, periods_per_year)
-            if len(values.dropna()) >= 4:
-                recent = values.tail(4).to_numpy(dtype=float)
-                output[f"{metric}_trend_4q"] = float(np.polyfit(np.arange(4), recent, 1)[0]) if np.isfinite(recent).all() else np.nan
+            if len(valid_values) >= 4:
+                recent = valid_values.tail(4).to_numpy(dtype=float)
+                output[f"{metric}_trend_4q"] = float(np.polyfit(np.arange(4), recent, 1)[0])
     revenue = latest.get("revenue", np.nan)
     equity = latest.get("stockholders_equity", np.nan)
     assets = latest.get("total_assets", np.nan)
@@ -131,23 +134,30 @@ def point_in_time_fundamentals(
         output[f"latest_{metric}"] = float(latest.get(metric, np.nan))
     trailing_periods = 1 if statement_type == "annual" else 4
     for metric in ("revenue", "net_income", "free_cash_flow"):
-        values = pd.to_numeric(visible.get(metric, pd.Series(dtype=float)), errors="coerce")
+        values = pd.to_numeric(visible.get(metric, pd.Series(dtype=float)), errors="coerce").dropna()
         output[f"ttm_{metric}"] = float(values.tail(trailing_periods).sum(min_count=trailing_periods))
-    eps_values = pd.to_numeric(visible.get("eps_diluted", pd.Series(dtype=float)), errors="coerce")
+    eps_values = pd.to_numeric(visible.get("eps_diluted", pd.Series(dtype=float)), errors="coerce").dropna()
     output["ttm_eps"] = float(eps_values.tail(trailing_periods).sum(min_count=trailing_periods))
     for name, value in margins.items():
         numerator = {"gross_margin": "gross_profit", "operating_margin": "operating_income", "net_margin": "net_income", "fcf_margin": "free_cash_flow"}[name]
-        series = pd.to_numeric(visible.get(numerator, pd.Series(dtype=float)), errors="coerce") / pd.to_numeric(visible.get("revenue", pd.Series(dtype=float)), errors="coerce")
+        series = (
+            pd.to_numeric(visible.get(numerator, pd.Series(dtype=float)), errors="coerce")
+            / pd.to_numeric(visible.get("revenue", pd.Series(dtype=float)), errors="coerce")
+        ).dropna()
         output[f"{name}_change_qoq"] = series.iloc[-1] - series.iloc[-2] if len(series) >= 2 else np.nan
         yoy_offset = periods_per_year + 1
         output[f"{name}_change_yoy"] = series.iloc[-1] - series.iloc[-yoy_offset] if len(series) >= yoy_offset else np.nan
-    revenue_series = pd.to_numeric(visible.get("revenue", pd.Series(dtype=float)), errors="coerce")
-    eps_series = pd.to_numeric(visible.get("eps_diluted", pd.Series(dtype=float)), errors="coerce")
+    revenue_series = pd.to_numeric(visible.get("revenue", pd.Series(dtype=float)), errors="coerce").dropna()
+    eps_series = pd.to_numeric(visible.get("eps_diluted", pd.Series(dtype=float)), errors="coerce").dropna()
     revenue_growth = revenue_series.pct_change(fill_method=None)
     eps_growth = eps_series.pct_change(fill_method=None)
     output["revenue_acceleration"] = revenue_growth.iloc[-1] - revenue_growth.iloc[-2] if len(revenue_growth) >= 3 else np.nan
     output["eps_acceleration"] = eps_growth.iloc[-1] - eps_growth.iloc[-2] if len(eps_growth) >= 3 else np.nan
     # Model A predictors may use lagged levels, never the future target quarter.
     for metric in ("revenue", "eps_diluted", "operating_margin", "free_cash_flow"):
-        output[f"lag_{metric}"] = margins[metric] if metric == "operating_margin" else float(latest.get(metric, np.nan))
+        if metric == "operating_margin":
+            output[f"lag_{metric}"] = margins[metric]
+            continue
+        values = pd.to_numeric(visible.get(metric, pd.Series(dtype=float)), errors="coerce").dropna()
+        output[f"lag_{metric}"] = float(values.iloc[-1]) if not values.empty else np.nan
     return output, visible

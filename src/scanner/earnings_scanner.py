@@ -46,6 +46,43 @@ def _add_growth_comparisons(live: pd.DataFrame) -> pd.DataFrame:
     return output
 
 
+def _prediction_quality_reasons(
+    row: pd.Series, training_ticker_count: int, scanner_config: dict
+) -> list[str]:
+    """Return reasons a forecast must not be converted into a trading signal."""
+    reasons: list[str] = []
+    minimum_tickers = int(scanner_config.get("minimum_training_tickers", 20))
+    if training_ticker_count < minimum_tickers:
+        reasons.append(f"model trained on only {training_ticker_count} tickers (minimum {minimum_tickers})")
+    statement_type = str(row.get("statement_type", "quarterly"))
+    minimum_history = int(scanner_config.get(
+        "minimum_annual_history" if statement_type == "annual" else "minimum_quarterly_history",
+        2 if statement_type == "annual" else 4,
+    ))
+    for metric, label in (("revenue", "revenue"), ("eps_diluted", "EPS")):
+        count = pd.to_numeric(pd.Series([row.get(f"{metric}_history_count")]), errors="coerce").iloc[0]
+        if pd.isna(count) or count < minimum_history:
+            reasons.append(f"only {int(count) if pd.notna(count) else 0} usable {label} periods")
+    predicted_revenue = pd.to_numeric(pd.Series([row.get("predicted_revenue")]), errors="coerce").iloc[0]
+    if pd.isna(predicted_revenue) or predicted_revenue <= 0:
+        reasons.append("revenue forecast is missing or non-positive")
+    else:
+        maximum_ratio = float(scanner_config.get("maximum_revenue_anchor_ratio", 5.0))
+        for column, label in (("lag_revenue", "latest reported revenue"), ("consensus_revenue", "analyst consensus")):
+            anchor = pd.to_numeric(pd.Series([row.get(column)]), errors="coerce").iloc[0]
+            if pd.notna(anchor) and anchor > 0:
+                ratio = predicted_revenue / anchor
+                if ratio > maximum_ratio or ratio < 1 / maximum_ratio:
+                    reasons.append(f"revenue forecast is {ratio:.1f}x {label}")
+    predicted_margin = pd.to_numeric(pd.Series([row.get("predicted_operating_margin")]), errors="coerce").iloc[0]
+    if pd.notna(predicted_margin) and not -1 <= predicted_margin <= 1:
+        reasons.append("operating-margin forecast is outside -100% to +100%")
+    predicted_fcf = pd.to_numeric(pd.Series([row.get("predicted_fcf")]), errors="coerce").iloc[0]
+    if pd.notna(predicted_fcf) and pd.notna(predicted_revenue) and abs(predicted_fcf) > 2 * predicted_revenue:
+        reasons.append("free-cash-flow forecast is more than twice revenue")
+    return reasons
+
+
 def _reported_comparison(
     history: pd.DataFrame, as_of: pd.Timestamp, metric: str, statement_type: str = "quarterly"
 ) -> tuple[float, float]:
@@ -148,18 +185,31 @@ def scan_events(config: dict, calendar: pd.DataFrame, top: int | None = None) ->
     financial_columns = bundle.financial.numeric_features + bundle.financial.categorical_features
     live = add_financial_predictions(live, bundle.financial.predict(_align(live, financial_columns)))
     live = _add_growth_comparisons(live)
+    training_ticker_count = len(getattr(bundle, "training_tickers", ()))
+    scanner_config = config.get("scanner", {})
+    quality_reasons = [
+        _prediction_quality_reasons(row, training_ticker_count, scanner_config)
+        for _, row in live.iterrows()
+    ]
+    live["data_quality"] = ["OK" if not reasons else "INSUFFICIENT_DATA" for reasons in quality_reasons]
+    live["quality_reason"] = ["; ".join(reasons) for reasons in quality_reasons]
     reaction_columns = bundle.reaction.numeric_features + bundle.reaction.categorical_features
     live = live.join(bundle.reaction.predict(_align(live, reaction_columns)))
     probability = live["probability_up"]
     threshold_long = float(config["backtest"]["long_threshold"])
     threshold_short = float(config["backtest"]["short_threshold"])
     minimum = float(config["backtest"]["minimum_confidence"])
+    quality_ok = live["data_quality"].eq("OK")
     live["signal"] = np.select([
-        (live["predicted_abnormal_return_3d"] > threshold_long) & (probability >= minimum),
-        (live["predicted_abnormal_return_3d"] < threshold_short) & ((1 - probability) >= minimum),
+        quality_ok & (live["predicted_abnormal_return_3d"] > threshold_long) & (probability >= minimum),
+        quality_ok & (live["predicted_abnormal_return_3d"] < threshold_short) & ((1 - probability) >= minimum),
     ], ["LONG", "SHORT"], default="NO_TRADE")
+    live.loc[~quality_ok, "signal"] = "INSUFFICIENT_DATA"
     live["confidence_score"] = np.maximum(probability, 1 - probability)
     live["confidence"] = pd.cut(live["confidence_score"], [0, .6, .75, 1], labels=["LOW", "MEDIUM", "HIGH"], include_lowest=True)
+    live["confidence"] = live["confidence"].astype(object)
+    live.loc[~quality_ok, "confidence"] = "N/A"
+    live.loc[~quality_ok, ["predicted_abnormal_return_3d", "probability_up"]] = np.nan
     live = live.sort_values(["predicted_abnormal_return_3d", "confidence_score", "market_cap_event"], key=lambda series: series.abs() if series.name == "predicted_abnormal_return_3d" else series, ascending=False)
     columns = [
         "ticker", "company", "earnings_date", "timing", "statement_type", "expected_fiscal_period",
@@ -169,6 +219,7 @@ def scan_events(config: dict, calendar: pd.DataFrame, top: int | None = None) ->
         "predicted_revenue_growth_yoy", "consensus_revenue_growth_yoy",
         "predicted_operating_margin", "predicted_fcf",
         "predicted_abnormal_return_3d", "probability_up", "confidence", "signal",
+        "data_quality", "quality_reason",
     ]
     result = live.reindex(columns=columns)
     return result.head(top).reset_index(drop=True) if top is not None else result.reset_index(drop=True)

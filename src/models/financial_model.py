@@ -14,6 +14,35 @@ from sklearn.pipeline import Pipeline
 from .common import finite_target, make_preprocessor
 
 
+def _model_target(frame: pd.DataFrame, target: str, values: pd.Series) -> pd.Series:
+    """Normalize level targets so predictions remain anchored to company scale."""
+    if target == "actual_revenue":
+        anchor = pd.to_numeric(frame.get("lag_revenue"), errors="coerce").abs().replace(0, np.nan)
+        return values / anchor
+    if target == "actual_eps":
+        anchor = pd.to_numeric(frame.get("lag_eps_diluted"), errors="coerce")
+        return values - anchor
+    if target == "actual_fcf":
+        anchor = pd.to_numeric(frame.get("lag_revenue"), errors="coerce").abs().replace(0, np.nan)
+        return values / anchor
+    return values
+
+
+def _restore_target(frame: pd.DataFrame, target: str, prediction: np.ndarray) -> np.ndarray:
+    """Convert normalized model output back to the reported financial unit."""
+    predicted = np.asarray(prediction, dtype=float)
+    if target == "actual_revenue":
+        anchor = pd.to_numeric(frame.get("lag_revenue"), errors="coerce").abs().to_numpy(dtype=float)
+        return predicted * anchor
+    if target == "actual_eps":
+        anchor = pd.to_numeric(frame.get("lag_eps_diluted"), errors="coerce").to_numpy(dtype=float)
+        return predicted + anchor
+    if target == "actual_fcf":
+        anchor = pd.to_numeric(frame.get("lag_revenue"), errors="coerce").abs().to_numpy(dtype=float)
+        return predicted * anchor
+    return predicted
+
+
 def _regressors(seed: int) -> dict[str, object]:
     models: dict[str, object] = {
         "linear": LinearRegression(),
@@ -49,11 +78,12 @@ class FinancialForecaster:
             if target not in frame:
                 continue
             y = finite_target(frame, target)
-            train_mask = fit_rows & y.notna()
-            valid_mask = validation_rows & y.notna()
+            model_y = _model_target(frame, target, y).replace([np.inf, -np.inf], np.nan)
+            train_mask = fit_rows & y.notna() & model_y.notna()
+            valid_mask = validation_rows & y.notna() & model_y.notna()
             if train_mask.sum() < 10 or valid_mask.sum() < 2:
-                train_mask = y.notna()
-                valid_mask = y.notna()
+                train_mask = y.notna() & model_y.notna()
+                valid_mask = y.notna() & model_y.notna()
             best_name, best_rmse, scores = "", np.inf, {}
             for name, estimator in _regressors(self.seed).items():
                 pipeline = Pipeline([
@@ -63,8 +93,10 @@ class FinancialForecaster:
                 try:
                     with warnings.catch_warnings():
                         warnings.simplefilter("error", ConvergenceWarning)
-                        pipeline.fit(frame.loc[train_mask], y.loc[train_mask])
-                    prediction = pipeline.predict(frame.loc[valid_mask])
+                        pipeline.fit(frame.loc[train_mask], model_y.loc[train_mask])
+                    prediction = _restore_target(
+                        frame.loc[valid_mask], target, pipeline.predict(frame.loc[valid_mask])
+                    )
                     score = float(np.sqrt(mean_squared_error(y.loc[valid_mask], prediction)))
                     scores[name] = score
                     if score < best_rmse:
@@ -73,7 +105,7 @@ class FinancialForecaster:
                     continue
             if not best_name:
                 continue
-            all_valid = y.notna()
+            all_valid = y.notna() & model_y.notna()
             final: Pipeline | None = None
             for candidate_name in sorted(scores, key=scores.get):
                 candidate = Pipeline([
@@ -83,7 +115,7 @@ class FinancialForecaster:
                 try:
                     with warnings.catch_warnings():
                         warnings.simplefilter("error", ConvergenceWarning)
-                        candidate.fit(frame.loc[all_valid], y.loc[all_valid])
+                        candidate.fit(frame.loc[all_valid], model_y.loc[all_valid])
                 except (ValueError, TypeError, FloatingPointError, ConvergenceWarning):
                     continue
                 best_name, final = candidate_name, candidate
@@ -92,7 +124,9 @@ class FinancialForecaster:
                 continue
             self.models[target] = final
             self.selected_models[target] = best_name
-            prediction = final.predict(frame.loc[all_valid])
+            prediction = _restore_target(
+                frame.loc[all_valid], target, final.predict(frame.loc[all_valid])
+            )
             self.validation_metrics[target] = {
                 "selected": best_name, "candidate_rmse": scores,
                 "mae_fit": float(mean_absolute_error(y.loc[all_valid], prediction)),
@@ -104,5 +138,7 @@ class FinancialForecaster:
     def predict(self, frame: pd.DataFrame) -> pd.DataFrame:
         result = pd.DataFrame(index=frame.index)
         for target, model in self.models.items():
-            result[f"predicted_{target.removeprefix('actual_')}"] = model.predict(frame)
+            result[f"predicted_{target.removeprefix('actual_')}"] = _restore_target(
+                frame, target, model.predict(frame)
+            )
         return result

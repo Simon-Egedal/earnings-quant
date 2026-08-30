@@ -24,6 +24,7 @@ class ModelBundle:
     reaction: ReactionForecaster
     trained_at: str
     train_period: tuple[int, int]
+    training_tickers: tuple[str, ...] = ()
 
 
 def add_financial_predictions(frame: pd.DataFrame, predictions: pd.DataFrame) -> pd.DataFrame:
@@ -68,11 +69,17 @@ def train_project(dataset: pd.DataFrame, config: dict, model_dir: Path) -> Model
     reaction_numeric, reaction_categorical = available_features(stacked, extra_exclude=targets)
     target = model_config.get("reaction_target", "abnormal_return_3d")
     reaction = ReactionForecaster(target, reaction_numeric, reaction_categorical, seed).fit(stacked)
-    bundle = ModelBundle(financial, reaction, datetime.now(UTC).isoformat(), (int(training["event_year"].min()), int(training["event_year"].max())))
+    training_tickers = tuple(sorted(training["ticker"].dropna().astype(str).str.upper().unique()))
+    bundle = ModelBundle(
+        financial, reaction, datetime.now(UTC).isoformat(),
+        (int(training["event_year"].min()), int(training["event_year"].max())),
+        training_tickers,
+    )
     model_dir.mkdir(parents=True, exist_ok=True)
     joblib.dump(bundle, model_dir / "model_bundle.joblib")
     metadata = {
         "trained_at": bundle.trained_at, "train_period": bundle.train_period,
+        "training_ticker_count": len(training_tickers), "training_tickers": training_tickers,
         "financial_features": financial_numeric + financial_categorical,
         "reaction_features": reaction_numeric + reaction_categorical,
         "financial_models": financial.selected_models, "reaction_models": reaction.selected_models,

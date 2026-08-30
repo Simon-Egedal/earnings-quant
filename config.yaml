@@ -41,4 +41,7 @@ backtest:
 scanner:
   default_days: 14
   default_top: 20
-
+  minimum_training_tickers: 20
+  minimum_quarterly_history: 4
+  minimum_annual_history: 2
+  maximum_revenue_anchor_ratio: 5.0

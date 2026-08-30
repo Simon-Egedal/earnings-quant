@@ -55,3 +55,23 @@ def test_scan_upcoming_restricts_calendar_to_selected_tickers(monkeypatch) -> No
 
     assert result["ticker"].tolist() == ["NVDA"]
     assert captured["top"] == 5
+
+
+def test_prediction_quality_rejects_undertrained_and_implausible_forecast() -> None:
+    row = pd.Series({
+        "statement_type": "quarterly",
+        "revenue_history_count": 4,
+        "eps_diluted_history_count": 4,
+        "lag_revenue": 220_000_000.0,
+        "consensus_revenue": 220_000_000.0,
+        "predicted_revenue": 35_000_000_000.0,
+        "predicted_operating_margin": -0.02,
+        "predicted_fcf": 7_000_000_000.0,
+    })
+
+    reasons = earnings_scanner._prediction_quality_reasons(
+        row, training_ticker_count=5, scanner_config={"minimum_training_tickers": 20}
+    )
+
+    assert any("only 5 tickers" in reason for reason in reasons)
+    assert any("revenue forecast" in reason and "analyst consensus" in reason for reason in reasons)

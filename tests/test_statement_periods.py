@@ -63,6 +63,24 @@ def test_annual_features_use_full_year_history_without_four_quarter_sum() -> Non
     assert np.isclose(features["revenue_yoy"], 0.10)
 
 
+def test_trailing_revenue_uses_last_four_non_missing_periods() -> None:
+    history = pd.DataFrame({
+        "ticker": "TEST",
+        "period_end": pd.date_range("2024-03-31", periods=6, freq="QE"),
+        "filed_at": pd.date_range("2024-05-01", periods=6, freq="QE"),
+        "statement_type": "quarterly",
+        "revenue": [100.0, None, 110.0, 120.0, None, 130.0],
+        "eps_diluted": [1.0, None, 1.1, 1.2, None, 1.3],
+    })
+
+    features, _ = point_in_time_fundamentals(
+        history, pd.Timestamp("2026-01-01", tz="UTC"), "quarterly"
+    )
+
+    assert features["revenue_history_count"] == 4.0
+    assert features["ttm_revenue"] == 460.0
+
+
 def test_next_statement_after_q3_is_annual() -> None:
     history = pd.DataFrame({
         "filed_at": pd.to_datetime(["2025-05-01", "2025-08-01", "2025-11-01"], utc=True),

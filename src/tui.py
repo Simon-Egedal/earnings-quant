@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 from pathlib import Path
 
@@ -136,6 +137,7 @@ class EarningsQuantApp(App[None]):
         self.config = load_config(config_path)
         ensure_directories(self.config)
         self.calendar = pd.DataFrame()
+        self.model_warning = ""
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -172,7 +174,15 @@ class EarningsQuantApp(App[None]):
         )
         model_path = Path(self.config["project"]["data_dir"]) / "models" / "model_bundle.joblib"
         if model_path.exists():
-            self._set_status("Model ready. Loading the upcoming earnings calendar…")
+            metadata_path = model_path.with_name("metadata.json")
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
+            ticker_count = int(metadata.get("training_ticker_count", 0))
+            minimum = int(self.config.get("scanner", {}).get("minimum_training_tickers", 20))
+            if ticker_count < minimum:
+                self.model_warning = f"Model coverage is too small ({ticker_count}/{minimum} training tickers). Signals will be rejected."
+                self._set_status(self.model_warning, error=True)
+            else:
+                self._set_status("Model ready. Loading the upcoming earnings calendar…")
         else:
             self._set_status("Model missing. The calendar will load, but analysis requires: python -m src.cli train", error=True)
         self.action_refresh_calendar()
@@ -230,7 +240,10 @@ class EarningsQuantApp(App[None]):
         if self.calendar.empty:
             self._set_status("No qualifying earnings events were found for this period.")
         else:
-            self._set_status(f"Loaded {len(self.calendar)} upcoming events. Select a row or type a ticker.")
+            message = f"Loaded {len(self.calendar)} upcoming events. Select a row or type a ticker."
+            if self.model_warning:
+                message = f"{message} {self.model_warning}"
+            self._set_status(message, error=bool(self.model_warning))
 
     @on(DataTable.RowSelected, "#calendar-table")
     def _calendar_row_selected(self, event: DataTable.RowSelected) -> None:
@@ -291,7 +304,9 @@ class EarningsQuantApp(App[None]):
         table.clear()
         for index, row in results.iterrows():
             signal = str(row.get("signal", "NO_TRADE"))
-            signal_style = {"LONG": "bold green", "SHORT": "bold red"}.get(signal, "bold yellow")
+            signal_style = {
+                "LONG": "bold green", "SHORT": "bold red", "INSUFFICIENT_DATA": "bold #ff7b72",
+            }.get(signal, "bold yellow")
             table.add_row(
                 str(row.get("ticker", "-")),
                 str(row.get("statement_type", "-")).title(),
@@ -313,6 +328,12 @@ class EarningsQuantApp(App[None]):
             self._set_status("No forecast was produced for the selection.", error=True)
             return
         row = results.iloc[0]
+        if row.get("data_quality") != "OK":
+            self.query_one("#detail", Static).update(
+                f"Forecast rejected: {row.get('quality_reason', 'insufficient or implausible source data')}"
+            )
+            self._set_status("Analysis finished, but no reliable signal could be produced.", error=True)
+            return
         detail = (
             f"{row.get('ticker', '-')} {str(row.get('statement_type', '-')).title()}"
             f" ({row.get('expected_fiscal_period', '-')}): expected operating margin {format_percent(row.get('predicted_operating_margin'))}"

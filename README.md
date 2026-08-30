@@ -108,6 +108,8 @@ python -m src.cli build-dataset
 python -m src.cli status
 ```
 
+The five-ticker development run is suitable for testing the pipeline, but it is intentionally too small to emit live `LONG` or `SHORT` signals. By default, the scanner requires a model trained on at least 20 distinct tickers. Run collection on the configured universe and retrain before using scanner signals.
+
 For the configured S&P 500 universe:
 
 ```powershell
@@ -193,6 +195,8 @@ This is an event-study backtest: signals can overlap, and the cumulative curve c
 ## Scanner output
 
 The scanner fetches all qualifying calendar pages (Yahoo caps each page at 100), refreshes current quarterly and annual analyst data, infers the upcoming fiscal statement cadence from the latest visible filing, calculates matching point-in-time features, runs both models, and ranks by absolute expected abnormal return, confidence, then market cap. Output includes statement type/fiscal period, ticker, company, date/timing, sector, cadence-matched consensus and predicted EPS/revenue, predicted growth and surprises, predicted 3D return, probability up, confidence, and signal.
+
+Financial level targets are anchored to each company's own prior statement: revenue and free cash flow are modeled as scale-relative values, while EPS is modeled as a change from prior EPS. Before a reaction forecast can become a signal, the scanner verifies training-universe coverage, cadence-specific history counts, revenue scale against both the latest report and analyst consensus, operating-margin bounds, and free-cash-flow scale. Failed validation produces `INSUFFICIENT_DATA`, explains the reason, and suppresses expected return and probability rather than emitting a misleading trade signal.
 
 ## Important limitations
 
