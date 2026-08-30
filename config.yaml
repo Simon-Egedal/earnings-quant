@@ -1,0 +1,44 @@
+project:
+  random_seed: 42
+  data_dir: data
+  results_dir: results
+
+sec:
+  # SEC requires a real organization/name and contact email. Override before collection.
+  user_agent: "EarningsQuant research@example.com"
+  requests_per_second: 5
+  cache_days: 7
+
+universe:
+  source: sp500
+  minimum_market_cap: 2000000000
+  tickers: []
+
+collection:
+  start_date: "2015-01-01"
+  price_symbol: "SPY"
+  refresh_prices_hours: 24
+  refresh_estimates_hours: 6
+
+model:
+  financial_targets: [actual_eps, actual_revenue, actual_operating_margin, actual_fcf]
+  reaction_target: abnormal_return_3d
+  minimum_train_rows: 100
+  random_seed: 42
+
+walk_forward:
+  first_train_year: 2016
+  first_test_year: 2022
+  final_test_year: 2025
+
+backtest:
+  long_threshold: 0.02
+  short_threshold: -0.02
+  minimum_confidence: 0.55
+  commission: 0.0
+  slippage: 0.001
+
+scanner:
+  default_days: 14
+  default_top: 20
+
