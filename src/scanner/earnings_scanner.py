@@ -217,6 +217,7 @@ def scan_events(config: dict, calendar: pd.DataFrame, top: int | None = None) ->
         "predicted_eps_surprise", "predicted_eps_growth_yoy", "consensus_eps_growth_yoy",
         "consensus_revenue", "predicted_revenue", "predicted_revenue_surprise",
         "predicted_revenue_growth_yoy", "consensus_revenue_growth_yoy",
+        "lag_eps_diluted", "lag_revenue", "lag_operating_margin", "lag_free_cash_flow",
         "predicted_operating_margin", "predicted_fcf",
         "predicted_abnormal_return_3d", "probability_up", "confidence", "signal",
         "data_quality", "quality_reason",

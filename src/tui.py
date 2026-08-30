@@ -52,6 +52,28 @@ def parse_tickers(value: str) -> list[str]:
     return list(dict.fromkeys(ticker.strip().upper() for ticker in normalized if ticker.strip()))
 
 
+def financial_comparison_rows(row: pd.Series) -> list[tuple[str, str, str]]:
+    """Format the latest matching statement beside the model forecast."""
+    return [
+        ("EPS", format_number(row.get("lag_eps_diluted")), format_number(row.get("predicted_eps"))),
+        (
+            "Revenue",
+            format_large_number(row.get("lag_revenue")),
+            format_large_number(row.get("predicted_revenue")),
+        ),
+        (
+            "Operating margin",
+            format_percent(row.get("lag_operating_margin")),
+            format_percent(row.get("predicted_operating_margin")),
+        ),
+        (
+            "Free cash flow",
+            format_large_number(row.get("lag_free_cash_flow")),
+            format_large_number(row.get("predicted_fcf")),
+        ),
+    ]
+
+
 class EarningsQuantApp(App[None]):
     """Keyboard-driven UI for selecting and scoring upcoming earnings events."""
 
@@ -113,8 +135,13 @@ class EarningsQuantApp(App[None]):
         min-height: 8;
         border: round #2d8b71;
     }
+    #financial-comparison {
+        height: 7;
+        min-height: 7;
+        border: round #24496b;
+    }
     #detail {
-        min-height: 3;
+        min-height: 2;
         padding: 0 1;
         color: #a9bed5;
     }
@@ -137,6 +164,7 @@ class EarningsQuantApp(App[None]):
         self.config = load_config(config_path)
         ensure_directories(self.config)
         self.calendar = pd.DataFrame()
+        self.results = pd.DataFrame()
         self.model_warning = ""
 
     def compose(self) -> ComposeResult:
@@ -156,6 +184,8 @@ class EarningsQuantApp(App[None]):
             yield DataTable(id="calendar-table")
             yield Label("FORECAST AND COMPARISON", classes="section-title")
             yield DataTable(id="results-table")
+            yield Label("LATEST REPORTED VS MODEL FORECAST", classes="section-title")
+            yield DataTable(id="financial-comparison")
             yield Static("Select a ticker to see forecast details.", id="detail")
             yield Static("Research output only — this application does not place trades or provide financial advice.", id="disclaimer")
         yield Footer()
@@ -172,6 +202,9 @@ class EarningsQuantApp(App[None]):
             "Ticker", "Statement", "Signal", "Pred EPS", "Street EPS", "EPS YoY", "Pred revenue",
             "Street revenue", "Revenue YoY", "Expected 3D", "P(up)", "Confidence",
         )
+        comparison_table = self.query_one("#financial-comparison", DataTable)
+        comparison_table.zebra_stripes = True
+        comparison_table.add_columns("Metric", "Latest reported", "Model forecast")
         model_path = Path(self.config["project"]["data_dir"]) / "models" / "model_bundle.joblib"
         if model_path.exists():
             metadata_path = model_path.with_name("metadata.json")
@@ -201,6 +234,7 @@ class EarningsQuantApp(App[None]):
 
     def _set_scan_busy(self, busy: bool) -> None:
         self.query_one("#results-table", DataTable).loading = busy
+        self.query_one("#financial-comparison", DataTable).loading = busy
         self.query_one("#run-scan", Button).disabled = busy
 
     def action_refresh_calendar(self) -> None:
@@ -300,9 +334,10 @@ class EarningsQuantApp(App[None]):
         self._set_status(f"Analysis failed: {message}", error=True)
 
     def _show_results(self, results: pd.DataFrame) -> None:
+        self.results = results.reset_index(drop=True)
         table = self.query_one("#results-table", DataTable)
         table.clear()
-        for index, row in results.iterrows():
+        for index, row in self.results.iterrows():
             signal = str(row.get("signal", "NO_TRADE"))
             signal_style = {
                 "LONG": "bold green", "SHORT": "bold red", "INSUFFICIENT_DATA": "bold #ff7b72",
@@ -323,11 +358,13 @@ class EarningsQuantApp(App[None]):
                 key=str(index),
             )
         self._set_scan_busy(False)
-        if results.empty:
+        if self.results.empty:
+            self.query_one("#financial-comparison", DataTable).clear()
             self.query_one("#detail", Static).update("No ticker could be scored. Check the warnings and source data.")
             self._set_status("No forecast was produced for the selection.", error=True)
             return
-        row = results.iloc[0]
+        row = self.results.iloc[0]
+        self._populate_financial_comparison(row)
         if row.get("data_quality") != "OK":
             self.query_one("#detail", Static).update(
                 f"Forecast rejected: {row.get('quality_reason', 'insufficient or implausible source data')}"
@@ -336,13 +373,36 @@ class EarningsQuantApp(App[None]):
             return
         detail = (
             f"{row.get('ticker', '-')} {str(row.get('statement_type', '-')).title()}"
-            f" ({row.get('expected_fiscal_period', '-')}): expected operating margin {format_percent(row.get('predicted_operating_margin'))}"
-            f"  •  expected free cash flow {format_large_number(row.get('predicted_fcf'))}"
+            f" ({row.get('expected_fiscal_period', '-')}):"
             f"  •  EPS vs street {format_percent(row.get('predicted_eps_surprise'))}"
             f"  •  revenue vs street {format_percent(row.get('predicted_revenue_surprise'))}"
         )
         self.query_one("#detail", Static).update(detail)
         self._set_status(f"Analysis complete for {len(results)} event(s).")
+
+    @on(DataTable.RowSelected, "#results-table")
+    def _result_row_selected(self, event: DataTable.RowSelected) -> None:
+        if not 0 <= event.cursor_row < len(self.results):
+            return
+        row = self.results.iloc[event.cursor_row]
+        self._populate_financial_comparison(row)
+        if row.get("data_quality") != "OK":
+            self.query_one("#detail", Static).update(
+                f"Forecast rejected: {row.get('quality_reason', 'insufficient or implausible source data')}"
+            )
+            return
+        self.query_one("#detail", Static).update(
+            f"{row.get('ticker', '-')} {str(row.get('statement_type', '-')).title()}"
+            f" ({row.get('expected_fiscal_period', '-')}):"
+            f"  •  EPS vs street {format_percent(row.get('predicted_eps_surprise'))}"
+            f"  •  revenue vs street {format_percent(row.get('predicted_revenue_surprise'))}"
+        )
+
+    def _populate_financial_comparison(self, row: pd.Series) -> None:
+        comparison = self.query_one("#financial-comparison", DataTable)
+        comparison.clear()
+        for metric, reported, forecast in financial_comparison_rows(row):
+            comparison.add_row(metric, reported, forecast)
 
 
 def main(argv: list[str] | None = None) -> int:
