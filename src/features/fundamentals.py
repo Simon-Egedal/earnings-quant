@@ -142,15 +142,15 @@ def point_in_time_fundamentals(
         numerator = {"gross_margin": "gross_profit", "operating_margin": "operating_income", "net_margin": "net_income", "fcf_margin": "free_cash_flow"}[name]
         series = (
             pd.to_numeric(visible.get(numerator, pd.Series(dtype=float)), errors="coerce")
-            / pd.to_numeric(visible.get("revenue", pd.Series(dtype=float)), errors="coerce")
-        ).dropna()
+            / pd.to_numeric(visible.get("revenue", pd.Series(dtype=float)), errors="coerce").replace(0, np.nan)
+        ).replace([np.inf, -np.inf], np.nan).dropna()
         output[f"{name}_change_qoq"] = series.iloc[-1] - series.iloc[-2] if len(series) >= 2 else np.nan
         yoy_offset = periods_per_year + 1
         output[f"{name}_change_yoy"] = series.iloc[-1] - series.iloc[-yoy_offset] if len(series) >= yoy_offset else np.nan
     revenue_series = pd.to_numeric(visible.get("revenue", pd.Series(dtype=float)), errors="coerce").dropna()
     eps_series = pd.to_numeric(visible.get("eps_diluted", pd.Series(dtype=float)), errors="coerce").dropna()
-    revenue_growth = revenue_series.pct_change(fill_method=None)
-    eps_growth = eps_series.pct_change(fill_method=None)
+    revenue_growth = revenue_series.pct_change(fill_method=None).replace([np.inf, -np.inf], np.nan).dropna()
+    eps_growth = eps_series.pct_change(fill_method=None).replace([np.inf, -np.inf], np.nan).dropna()
     output["revenue_acceleration"] = revenue_growth.iloc[-1] - revenue_growth.iloc[-2] if len(revenue_growth) >= 3 else np.nan
     output["eps_acceleration"] = eps_growth.iloc[-1] - eps_growth.iloc[-2] if len(eps_growth) >= 3 else np.nan
     # Model A predictors may use lagged levels, never the future target quarter.

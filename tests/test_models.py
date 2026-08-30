@@ -43,3 +43,20 @@ def test_revenue_forecast_is_anchored_to_company_scale():
     prediction = model.predict(pd.DataFrame({"lag_revenue": [10.0], "revenue_yoy": [0.10]}))
 
     assert prediction.loc[0, "predicted_revenue"] == pytest.approx(11.0, rel=0.10)
+
+
+def test_financial_model_treats_infinite_features_as_missing():
+    frame = pd.DataFrame({
+        "event_year": np.repeat([2020, 2021, 2022, 2023], 12),
+        "lag_revenue": np.linspace(100.0, 200.0, 48),
+        "revenue_yoy": np.linspace(0.01, 0.20, 48),
+    })
+    frame["actual_revenue"] = frame["lag_revenue"] * 1.1
+    frame.loc[0, "revenue_yoy"] = np.inf
+    model = FinancialForecaster(
+        ["actual_revenue"], ["lag_revenue", "revenue_yoy"], seed=42
+    ).fit(frame)
+
+    prediction = model.predict(pd.DataFrame({"lag_revenue": [150.0], "revenue_yoy": [np.inf]}))
+
+    assert np.isfinite(prediction.loc[0, "predicted_revenue"])

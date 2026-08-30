@@ -7,7 +7,7 @@ import pandas as pd
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.preprocessing import FunctionTransformer, OneHotEncoder, StandardScaler
 
 
 IDENTIFIERS = {
@@ -16,6 +16,14 @@ IDENTIFIERS = {
 }
 LEAKAGE_PREFIXES = ("actual_", "abnormal_return_", "return_1d_target", "return_3d_target", "return_5d_target")
 LEAKAGE_COLUMNS = {"eps_surprise", "eps_surprise_pct", "revenue_surprise", "reported_eps"}
+
+
+def replace_infinite(values):
+    """Treat infinite numeric features as missing before sklearn validation."""
+    if isinstance(values, pd.DataFrame):
+        return values.replace([np.inf, -np.inf], np.nan)
+    array = np.asarray(values, dtype=float)
+    return np.where(np.isfinite(array), array, np.nan)
 
 
 def available_features(frame: pd.DataFrame, extra_exclude: Iterable[str] = ()) -> tuple[list[str], list[str]]:
@@ -30,7 +38,10 @@ def available_features(frame: pd.DataFrame, extra_exclude: Iterable[str] = ()) -
 
 
 def make_preprocessor(numeric: list[str], categorical: list[str], scale: bool = False) -> ColumnTransformer:
-    numeric_steps: list[tuple[str, object]] = [("impute", SimpleImputer(strategy="median", keep_empty_features=True))]
+    numeric_steps: list[tuple[str, object]] = [
+        ("finite", FunctionTransformer(replace_infinite, feature_names_out="one-to-one")),
+        ("impute", SimpleImputer(strategy="median", keep_empty_features=True)),
+    ]
     if scale:
         numeric_steps.append(("scale", StandardScaler()))
     transformers: list[tuple[str, object, list[str]]] = [("numeric", Pipeline(numeric_steps), numeric)]
