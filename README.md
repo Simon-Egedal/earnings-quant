@@ -168,6 +168,8 @@ Fundamentals include quarterly/yearly growth, four-quarter trends, margins and m
 
 Model A separately predicts actual EPS, revenue, operating margin, and free cash flow. Candidate validation includes linear regression, Ridge, Lasso, random forest, histogram gradient boosting, and XGBoost when installed. Model B predicts both `abnormal_return_3d` and `P(up)` using linear/logistic, regularized, forest, and boosting candidates.
 
+Model B also includes mean-return and prior-probability baselines. A more complex reaction model is selected only when it beats the corresponding naive baseline on chronological validation data.
+
 The reaction model is trained on expanding-window, out-of-fold Model A forecasts. It never receives Model A fitted values from the same observations. Model selection uses the last training year as validation; the configured `final_test_year` is excluded from training and remains untouched until `evaluate`.
 
 Model metadata records feature names, selected estimators, training timestamp and period, candidate validation scores, and fit diagnostics. Models are serialized with joblib. Seeds are fixed in configuration.
@@ -197,6 +199,8 @@ This is an event-study backtest: signals can overlap, and the cumulative curve c
 The scanner fetches all qualifying calendar pages (Yahoo caps each page at 100), refreshes current quarterly and annual analyst data, infers the upcoming fiscal statement cadence from the latest visible filing, calculates matching point-in-time features, runs both models, and ranks by absolute expected abnormal return, confidence, then market cap. Output includes statement type/fiscal period, ticker, company, date/timing, sector, cadence-matched consensus and predicted EPS/revenue, predicted growth and surprises, predicted 3D return, probability up, confidence, and signal.
 
 Financial level targets are anchored to each company's own prior statement: revenue and free cash flow are modeled as scale-relative values, while EPS is modeled as a change from prior EPS. Before a reaction forecast can become a signal, the scanner verifies training-universe coverage, cadence-specific history counts, revenue scale against both the latest report and analyst consensus, operating-margin bounds, and free-cash-flow scale. Failed validation produces `INSUFFICIENT_DATA`, explains the reason, and suppresses expected return and probability rather than emitting a misleading trade signal.
+
+The scanner additionally requires saved walk-forward evidence for the reaction model. By default, overall ROC AUC must be at least `0.52` and reaction-return R² at least `0.0`; otherwise every live event is marked `INSUFFICIENT_DATA`. Retraining invalidates old evaluation artifacts, so `evaluate` must be run again before live signals can resume.
 
 ## Important limitations
 

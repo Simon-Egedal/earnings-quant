@@ -17,6 +17,12 @@ def _combine(frames: list[pd.DataFrame], keys: list[str]) -> pd.DataFrame:
     return pd.concat(useful, ignore_index=True).drop_duplicates(keys, keep="last")
 
 
+def _merge_existing(frame: pd.DataFrame, path: Path, keys: list[str]) -> pd.DataFrame:
+    """Update an artifact without deleting cached tickers that failed this run."""
+    existing = pd.read_parquet(path) if path.exists() else pd.DataFrame()
+    return _combine([existing, frame], keys)
+
+
 def collect_data(
     config: dict, tickers: list[str] | None = None, limit: int | None = None, refresh: bool = False
 ) -> dict[str, int]:
@@ -64,6 +70,16 @@ def collect_data(
         "earnings": _combine(earnings, ["ticker", "earnings_date"]),
         "prices": _combine(price_frames, ["ticker", "date"]),
         "metadata": pd.DataFrame(metadata).drop_duplicates("ticker", keep="last") if metadata else pd.DataFrame(),
+    }
+    keys_by_name = {
+        "fundamentals": ["ticker", "period_end", "filed_at", "accession", "statement_type"],
+        "earnings": ["ticker", "earnings_date"],
+        "prices": ["ticker", "date"],
+        "metadata": ["ticker"],
+    }
+    outputs = {
+        name: _merge_existing(frame, data_dir / "raw" / f"{name}.parquet", keys_by_name[name])
+        for name, frame in outputs.items()
     }
     counts: dict[str, int] = {}
     db_path = cache_dir / "metadata.sqlite"

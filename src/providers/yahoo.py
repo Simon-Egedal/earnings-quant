@@ -6,6 +6,7 @@ from typing import Any, Iterable
 
 import pandas as pd
 
+from src.event_time import event_timing
 from src.logging_utils import log
 
 
@@ -58,6 +59,8 @@ class YahooFinanceProvider:
         date_column = next((c for c in ("earnings_date", "event_start_date") if c in frame), None)
         if date_column:
             frame["earnings_date"] = pd.to_datetime(frame[date_column], utc=True, errors="coerce")
+        if "timing" not in frame:
+            frame["timing"] = [event_timing(value) for value in frame["earnings_date"]]
         log("SCAN", "%d companies reporting within %d days", len(frame), days)
         return frame.drop_duplicates(["ticker", "earnings_date"]).reset_index(drop=True)
 
@@ -74,6 +77,7 @@ class YahooFinanceProvider:
         })
         frame["ticker"] = ticker.upper()
         frame["earnings_date"] = pd.to_datetime(frame["earnings_date"], utc=True, errors="coerce")
+        frame["timing"] = [event_timing(value) for value in frame["earnings_date"]]
         return frame.dropna(subset=["earnings_date"]).sort_values("earnings_date")
 
     def price_history(self, tickers: Iterable[str], start: str, end: str | None = None) -> pd.DataFrame:

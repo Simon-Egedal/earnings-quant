@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 
 from src.logging_utils import log
-from .analyst import historical_surprise_features
+from .analyst import aligned_actual_eps, historical_eps_features, historical_surprise_features
 from .fundamentals import infer_next_statement_type, point_in_time_fundamentals, safe_divide
 from .market import event_returns, market_features
 
@@ -47,6 +47,12 @@ class EventDatasetBuilder:
         rows: list[dict] = []
         for ticker, company_events in earnings.groupby("ticker"):
             company_fundamentals = fundamentals.loc[fundamentals["ticker"] == ticker]
+            company_prices = prices.loc[
+                prices["ticker"].isin([ticker, self.benchmark])
+            ].copy()
+            company_prices["_session_date"] = pd.to_datetime(
+                company_prices["date"], utc=True, errors="coerce"
+            ).dt.date
             for _, event in company_events.sort_values("earnings_date").iterrows():
                 event_date = pd.Timestamp(event["earnings_date"])
                 inferred_type, expected_period = infer_next_statement_type(company_fundamentals, event_date)
@@ -65,9 +71,13 @@ class EventDatasetBuilder:
                     row["consensus_eps"] = row.get("annual_consensus_eps", np.nan)
                     row["consensus_revenue"] = row.get("annual_consensus_revenue", np.nan)
                 row.update(features)
+                row.update(historical_eps_features(company_events, event_date, statement_type))
                 row.update(historical_surprise_features(company_events, event_date))
-                row.update(market_features(prices, ticker, event_date, self.benchmark))
-                row.update(event_returns(prices, ticker, event_date, self.benchmark, str(event.get("timing", ""))))
+                timing = str(event.get("timing", ""))
+                row.update(market_features(company_prices, ticker, event_date, self.benchmark, timing))
+                row.update(event_returns(
+                    company_prices, ticker, event_date, self.benchmark, timing
+                ))
                 price = row.get("price_asof", np.nan)
                 shares = row.get("latest_shares_outstanding", np.nan)
                 market_cap = price * shares if pd.notna(price) and pd.notna(shares) else np.nan
@@ -86,8 +96,11 @@ class EventDatasetBuilder:
                     row["actual_operating_margin"] = safe_divide(report.get("operating_income", np.nan), report.get("revenue", np.nan))
                     row["actual_fcf"] = report.get("free_cash_flow", np.nan)
                     row["target_filed_at"] = report.get("filed_at")
-                    if pd.notna(report.get("eps_diluted", np.nan)):
-                        row["actual_eps"] = report.get("eps_diluted", np.nan)
+                eps_target = aligned_actual_eps(company_events, event_date, statement_type)
+                if pd.notna(eps_target):
+                    row["actual_eps"] = eps_target
+                elif report is not None and pd.notna(report.get("eps_diluted", np.nan)):
+                    row["actual_eps"] = report.get("eps_diluted", np.nan)
                 row["max_feature_filed_at"] = visible["filed_at"].max()
                 row["event_year"] = event_date.year
                 rows.append(row)

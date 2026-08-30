@@ -27,6 +27,7 @@ def test_dataset_records_and_audits_feature_provenance(quarterly_fundamentals, p
     })
     dataset = EventDatasetBuilder().build(quarterly_fundamentals, earnings, prices)
     assert len(dataset) == 1
+    assert dataset.loc[0, "actual_eps"] == 1.3
     assert_no_lookahead(dataset)
     assert pd.Timestamp(dataset.iloc[0]["max_feature_filed_at"]) < dataset.iloc[0]["earnings_date"]
 

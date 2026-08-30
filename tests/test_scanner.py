@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pandas as pd
 import pytest
 
@@ -75,3 +77,21 @@ def test_prediction_quality_rejects_undertrained_and_implausible_forecast() -> N
 
     assert any("only 5 tickers" in reason for reason in reasons)
     assert any("revenue forecast" in reason and "analyst consensus" in reason for reason in reasons)
+
+
+def test_model_quality_rejects_reaction_model_that_does_not_beat_baselines(tmp_path) -> None:
+    metrics = {
+        "walk_forward_overall": {
+            "reaction_classification": {"roc_auc": 0.49},
+            "reaction_regression": {"r2": -0.10},
+        }
+    }
+    (tmp_path / "holdout_metrics.json").write_text(json.dumps(metrics))
+
+    reasons = earnings_scanner._model_quality_reasons(tmp_path, {
+        "minimum_walk_forward_auc": 0.52,
+        "minimum_walk_forward_r2": 0.0,
+    })
+
+    assert any("AUC" in reason for reason in reasons)
+    assert any("R2" in reason for reason in reasons)

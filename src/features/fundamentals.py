@@ -11,7 +11,7 @@ def safe_divide(numerator: float, denominator: float) -> float:
 
 
 def _growth(values: pd.Series, periods: int) -> float:
-    values = pd.to_numeric(values, errors="coerce").dropna()
+    values = pd.to_numeric(values, errors="coerce")
     if len(values) <= periods:
         return np.nan
     return safe_divide(values.iloc[-1] - values.iloc[-1 - periods], abs(values.iloc[-1 - periods]))
@@ -67,29 +67,18 @@ def point_in_time_fundamentals(
     # An amendment may replace a previously visible filing, but future amendments cannot.
     # Later filings often repeat comparative facts sparsely. Consolidate each period
     # column-by-column so a later sparse filing does not erase previously public facts.
-    consolidated: list[dict] = []
     metadata = {
         "ticker", "period_end", "filed_at", "fiscal_year", "fiscal_period", "form", "accession",
         "statement_type", "period_start", "duration_days", "frame", "filed_date",
     }
     value_columns = [column for column in visible.columns if column not in metadata]
-    for period_end, group in visible.sort_values("filed_at").groupby("period_end"):
-        record: dict[str, object] = {"period_end": period_end, "filed_at": group["filed_at"].max()}
-        for column in value_columns:
-            values = group[column].dropna()
-            record[column] = values.iloc[-1] if not values.empty else np.nan
-        consolidated.append(record)
-    visible = pd.DataFrame(consolidated).sort_values("period_end")
-    duration_metrics = [
-        column for column in (
-            "revenue", "cost_of_revenue", "gross_profit", "operating_income", "net_income",
-            "eps_diluted", "operating_cash_flow", "capital_expenditures", "free_cash_flow",
-        ) if column in visible
-    ]
-    if duration_metrics:
-        statement_rows = visible[duration_metrics].notna().any(axis=1)
-        if statement_rows.any():
-            visible = visible.loc[statement_rows]
+    groups = visible.sort_values("filed_at").groupby("period_end", sort=True)
+    visible = groups[value_columns].last()
+    visible["filed_at"] = groups["filed_at"].max()
+    visible = visible.reset_index().sort_values("period_end")
+    # Keep sparse periods in the timeline. Removing a period merely because its
+    # duration metrics are missing would make TTM and YoY calculations jump over
+    # the gap and compare non-consecutive quarters.
     visible = visible.tail(8)
     latest = visible.iloc[-1]
     periods_per_year = 1 if statement_type == "annual" else 4
@@ -106,8 +95,9 @@ def point_in_time_fundamentals(
             output[f"{metric}_history_count"] = float(len(valid_values))
             output[f"{metric}_qoq"] = _growth(values, 1)
             output[f"{metric}_yoy"] = _growth(values, periods_per_year)
-            if len(valid_values) >= 4:
-                recent = valid_values.tail(4).to_numpy(dtype=float)
+            recent_values = values.tail(4)
+            if len(recent_values) == 4 and recent_values.notna().all():
+                recent = recent_values.to_numpy(dtype=float)
                 output[f"{metric}_trend_4q"] = float(np.polyfit(np.arange(4), recent, 1)[0])
     revenue = latest.get("revenue", np.nan)
     equity = latest.get("stockholders_equity", np.nan)
@@ -127,32 +117,46 @@ def point_in_time_fundamentals(
         "debt_to_assets": safe_divide(debt, assets),
         "cash_to_debt": safe_divide(latest.get("cash", np.nan), debt),
         "current_ratio": safe_divide(latest.get("current_assets", np.nan), latest.get("current_liabilities", np.nan)),
-        "asset_growth": _growth(pd.to_numeric(visible.get("total_assets", pd.Series(dtype=float)), errors="coerce"), 4),
-        "share_dilution": _growth(pd.to_numeric(visible.get("shares_outstanding", pd.Series(dtype=float)), errors="coerce"), 4),
+        "asset_growth": _growth(
+            pd.to_numeric(visible.get("total_assets", pd.Series(dtype=float)), errors="coerce"),
+            periods_per_year,
+        ),
+        "share_dilution": _growth(
+            pd.to_numeric(visible.get("shares_outstanding", pd.Series(dtype=float)), errors="coerce"),
+            periods_per_year,
+        ),
     })
     for metric in ("shares_outstanding", "stockholders_equity", "total_debt", "cash"):
         output[f"latest_{metric}"] = float(latest.get(metric, np.nan))
     trailing_periods = 1 if statement_type == "annual" else 4
     for metric in ("revenue", "net_income", "free_cash_flow"):
-        values = pd.to_numeric(visible.get(metric, pd.Series(dtype=float)), errors="coerce").dropna()
+        values = pd.to_numeric(visible.get(metric, pd.Series(dtype=float)), errors="coerce")
         output[f"ttm_{metric}"] = float(values.tail(trailing_periods).sum(min_count=trailing_periods))
-    eps_values = pd.to_numeric(visible.get("eps_diluted", pd.Series(dtype=float)), errors="coerce").dropna()
+    eps_values = pd.to_numeric(visible.get("eps_diluted", pd.Series(dtype=float)), errors="coerce")
     output["ttm_eps"] = float(eps_values.tail(trailing_periods).sum(min_count=trailing_periods))
     for name, value in margins.items():
         numerator = {"gross_margin": "gross_profit", "operating_margin": "operating_income", "net_margin": "net_income", "fcf_margin": "free_cash_flow"}[name]
         series = (
             pd.to_numeric(visible.get(numerator, pd.Series(dtype=float)), errors="coerce")
             / pd.to_numeric(visible.get("revenue", pd.Series(dtype=float)), errors="coerce").replace(0, np.nan)
-        ).replace([np.inf, -np.inf], np.nan).dropna()
+        ).replace([np.inf, -np.inf], np.nan)
         output[f"{name}_change_qoq"] = series.iloc[-1] - series.iloc[-2] if len(series) >= 2 else np.nan
         yoy_offset = periods_per_year + 1
         output[f"{name}_change_yoy"] = series.iloc[-1] - series.iloc[-yoy_offset] if len(series) >= yoy_offset else np.nan
-    revenue_series = pd.to_numeric(visible.get("revenue", pd.Series(dtype=float)), errors="coerce").dropna()
-    eps_series = pd.to_numeric(visible.get("eps_diluted", pd.Series(dtype=float)), errors="coerce").dropna()
-    revenue_growth = revenue_series.pct_change(fill_method=None).replace([np.inf, -np.inf], np.nan).dropna()
-    eps_growth = eps_series.pct_change(fill_method=None).replace([np.inf, -np.inf], np.nan).dropna()
-    output["revenue_acceleration"] = revenue_growth.iloc[-1] - revenue_growth.iloc[-2] if len(revenue_growth) >= 3 else np.nan
-    output["eps_acceleration"] = eps_growth.iloc[-1] - eps_growth.iloc[-2] if len(eps_growth) >= 3 else np.nan
+    revenue_series = pd.to_numeric(visible.get("revenue", pd.Series(dtype=float)), errors="coerce")
+    eps_series = pd.to_numeric(visible.get("eps_diluted", pd.Series(dtype=float)), errors="coerce")
+    revenue_growth = revenue_series.pct_change(fill_method=None).replace([np.inf, -np.inf], np.nan)
+    eps_growth = eps_series.pct_change(fill_method=None).replace([np.inf, -np.inf], np.nan)
+    output["revenue_acceleration"] = (
+        revenue_growth.iloc[-1] - revenue_growth.iloc[-2]
+        if len(revenue_growth) >= 3 and revenue_growth.tail(2).notna().all()
+        else np.nan
+    )
+    output["eps_acceleration"] = (
+        eps_growth.iloc[-1] - eps_growth.iloc[-2]
+        if len(eps_growth) >= 3 and eps_growth.tail(2).notna().all()
+        else np.nan
+    )
     # Model A predictors may use lagged levels, never the future target quarter.
     for metric in ("revenue", "eps_diluted", "operating_margin", "free_cash_flow"):
         if metric == "operating_margin":

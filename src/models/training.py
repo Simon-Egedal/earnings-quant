@@ -27,6 +27,15 @@ class ModelBundle:
     training_tickers: tuple[str, ...] = ()
 
 
+def _remove_stale_evaluation_artifacts(model_dir: Path) -> None:
+    for name in (
+        "holdout_predictions.parquet",
+        "walk_forward_predictions.parquet",
+        "holdout_metrics.json",
+    ):
+        (model_dir / name).unlink(missing_ok=True)
+
+
 def add_financial_predictions(frame: pd.DataFrame, predictions: pd.DataFrame) -> pd.DataFrame:
     output = frame.copy()
     for column in predictions:
@@ -76,6 +85,7 @@ def train_project(dataset: pd.DataFrame, config: dict, model_dir: Path) -> Model
         training_tickers,
     )
     model_dir.mkdir(parents=True, exist_ok=True)
+    _remove_stale_evaluation_artifacts(model_dir)
     joblib.dump(bundle, model_dir / "model_bundle.joblib")
     metadata = {
         "trained_at": bundle.trained_at, "train_period": bundle.train_period,

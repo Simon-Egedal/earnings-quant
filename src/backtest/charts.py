@@ -22,7 +22,7 @@ def generate_charts(frame: pd.DataFrame, output_dir: Path) -> list[Path]:
     ordered = frame.sort_values("earnings_date").copy()
     equity = (1 + ordered["strategy_return"].fillna(0)).cumprod()
     plt.figure(figsize=(9, 4)); plt.plot(pd.to_datetime(ordered["earnings_date"]), equity); plt.title("Cumulative event-study return"); plt.ylabel("Growth of $1"); save("cumulative_returns.png")
-    plt.figure(figsize=(9, 4)); plt.fill_between(pd.to_datetime(ordered["earnings_date"]), equity / equity.cummax() - 1, 0); plt.title("Drawdown"); save("drawdown.png")
+    plt.figure(figsize=(9, 4)); plt.fill_between(pd.to_datetime(ordered["earnings_date"]), equity / equity.cummax().clip(lower=1.0) - 1, 0); plt.title("Drawdown"); save("drawdown.png")
     plt.figure(figsize=(6, 6)); plt.scatter(ordered["predicted_abnormal_return_3d"], ordered["abnormal_return_3d"], alpha=.5); plt.axhline(0, color="grey"); plt.axvline(0, color="grey"); plt.xlabel("Predicted"); plt.ylabel("Actual"); plt.title("Prediction vs actual abnormal return"); save("prediction_vs_actual.png")
     hit = (np.sign(ordered["predicted_abnormal_return_3d"]) == np.sign(ordered["abnormal_return_3d"])).astype(float).rolling(50, min_periods=10).mean()
     plt.figure(figsize=(9, 4)); plt.plot(pd.to_datetime(ordered["earnings_date"]), hit); plt.ylim(0, 1); plt.title("Rolling 50-event directional hit rate"); save("rolling_hit_rate.png")

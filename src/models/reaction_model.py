@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import HistGradientBoostingClassifier, HistGradientBoostingRegressor, RandomForestClassifier, RandomForestRegressor
+from sklearn.dummy import DummyClassifier, DummyRegressor
 from sklearn.linear_model import LinearRegression, LogisticRegression, Ridge
 from sklearn.metrics import accuracy_score, log_loss, mean_absolute_error, mean_squared_error, r2_score, roc_auc_score
 from sklearn.pipeline import Pipeline
@@ -14,6 +15,7 @@ from .common import finite_target, make_preprocessor
 
 def _reaction_regressors(seed: int) -> dict[str, object]:
     return {
+        "baseline_mean": DummyRegressor(strategy="mean"),
         "linear": LinearRegression(), "ridge": Ridge(alpha=1.0),
         "random_forest": RandomForestRegressor(n_estimators=300, min_samples_leaf=5, n_jobs=-1, random_state=seed),
         "hist_gradient_boosting": HistGradientBoostingRegressor(max_iter=200, l2_regularization=1.0, random_state=seed),
@@ -22,6 +24,7 @@ def _reaction_regressors(seed: int) -> dict[str, object]:
 
 def _classifiers(seed: int) -> dict[str, object]:
     return {
+        "baseline_prior": DummyClassifier(strategy="prior"),
         "logistic": LogisticRegression(C=1.0, max_iter=2000),
         "random_forest": RandomForestClassifier(n_estimators=300, min_samples_leaf=5, n_jobs=-1, random_state=seed, class_weight="balanced"),
         "hist_gradient_boosting": HistGradientBoostingClassifier(max_iter=200, l2_regularization=1.0, random_state=seed),

@@ -5,7 +5,7 @@ import pandas as pd
 
 from src.features.builder import EventDatasetBuilder
 from src.features.fundamentals import infer_next_statement_type, point_in_time_fundamentals
-from src.providers.sec import classify_statement_type, derive_fourth_quarters
+from src.providers.sec import classify_statement_type, combine_total_debt, derive_fourth_quarters
 from src.providers.yahoo import YahooFinanceProvider
 
 
@@ -14,6 +14,20 @@ def test_sec_fact_cadence_classification_separates_quarter_ytd_and_year() -> Non
     assert classify_statement_type("10-Q", "Q2", 181) == "year_to_date"
     assert classify_statement_type("10-K", "FY", 365) == "annual"
     assert classify_statement_type("10-K", "FY", None, instant=True) == "annual"
+
+
+def test_total_debt_combines_long_and_short_without_treating_missing_as_zero() -> None:
+    frame = pd.DataFrame({
+        "long_term_debt": [90.0, np.nan, np.nan],
+        "short_term_debt": [10.0, 5.0, np.nan],
+        "total_debt": [np.nan, 7.0, np.nan],
+    })
+
+    result = combine_total_debt(frame)
+
+    assert result["total_debt"].iloc[0] == 100.0
+    assert result["total_debt"].iloc[1] == 7.0
+    assert np.isnan(result["total_debt"].iloc[2])
 
 
 def test_fourth_quarter_is_derived_from_annual_less_first_three_quarters() -> None:
@@ -63,7 +77,7 @@ def test_annual_features_use_full_year_history_without_four_quarter_sum() -> Non
     assert np.isclose(features["revenue_yoy"], 0.10)
 
 
-def test_trailing_revenue_uses_last_four_non_missing_periods() -> None:
+def test_trailing_revenue_requires_four_consecutive_periods() -> None:
     history = pd.DataFrame({
         "ticker": "TEST",
         "period_end": pd.date_range("2024-03-31", periods=6, freq="QE"),
@@ -78,7 +92,8 @@ def test_trailing_revenue_uses_last_four_non_missing_periods() -> None:
     )
 
     assert features["revenue_history_count"] == 4.0
-    assert features["ttm_revenue"] == 460.0
+    assert np.isnan(features["ttm_revenue"])
+    assert np.isnan(features["revenue_qoq"])
 
 
 def test_next_statement_after_q3_is_annual() -> None:

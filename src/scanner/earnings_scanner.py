@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import joblib
 import numpy as np
 import pandas as pd
 
-from src.features.analyst import historical_surprise_features, normalize_live_analyst_features
+from src.features.analyst import historical_eps_features, historical_surprise_features, normalize_live_analyst_features
 from src.features.fundamentals import infer_next_statement_type, point_in_time_fundamentals, safe_divide
 from src.features.market import market_features
 from src.logging_utils import log
@@ -83,6 +84,28 @@ def _prediction_quality_reasons(
     return reasons
 
 
+def _model_quality_reasons(model_dir: Path, scanner_config: dict) -> list[str]:
+    """Reject signals when saved walk-forward evidence does not beat baselines."""
+    path = model_dir / "holdout_metrics.json"
+    if not path.exists():
+        return ["model has not been walk-forward evaluated; run evaluate"]
+    try:
+        metrics = json.loads(path.read_text(encoding="utf-8"))
+        overall = metrics["walk_forward_overall"]
+        auc = float(overall["reaction_classification"]["roc_auc"])
+        r2 = float(overall["reaction_regression"]["r2"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return ["saved walk-forward metrics are missing or invalid; run evaluate"]
+    reasons: list[str] = []
+    minimum_auc = float(scanner_config.get("minimum_walk_forward_auc", 0.52))
+    minimum_r2 = float(scanner_config.get("minimum_walk_forward_r2", 0.0))
+    if not np.isfinite(auc) or auc < minimum_auc:
+        reasons.append(f"walk-forward AUC {auc:.3f} is below required {minimum_auc:.3f}")
+    if not np.isfinite(r2) or r2 < minimum_r2:
+        reasons.append(f"walk-forward R2 {r2:.3f} is below required {minimum_r2:.3f}")
+    return reasons
+
+
 def _reported_comparison(
     history: pd.DataFrame, as_of: pd.Timestamp, metric: str, statement_type: str = "quarterly"
 ) -> tuple[float, float]:
@@ -153,6 +176,9 @@ def scan_events(config: dict, calendar: pd.DataFrame, top: int | None = None) ->
                 row["quarterly_consensus_revenue"] = row.get("consensus_revenue", np.nan)
                 row["consensus_eps"] = row.get("annual_consensus_eps", np.nan)
                 row["consensus_revenue"] = row.get("annual_consensus_revenue", np.nan)
+            if not historical.empty:
+                company_history = historical[historical["ticker"] == ticker]
+                row.update(historical_eps_features(company_history, event_date, statement_type))
             latest_eps, prior_eps = _reported_comparison(fundamentals, event_date, "eps_diluted", statement_type)
             latest_revenue, prior_revenue = _reported_comparison(fundamentals, event_date, "revenue", statement_type)
             row.update({
@@ -161,9 +187,15 @@ def scan_events(config: dict, calendar: pd.DataFrame, top: int | None = None) ->
                 "prior_year_eps": prior_eps,
                 "prior_year_revenue": prior_revenue,
             })
-            row.update(market_features(prices, ticker, event_date, config["collection"].get("price_symbol", "SPY")))
+            row.update(market_features(
+                prices,
+                ticker,
+                event_date,
+                config["collection"].get("price_symbol", "SPY"),
+                str(event.get("timing", "")),
+            ))
             if not historical.empty:
-                row.update(historical_surprise_features(historical[historical["ticker"] == ticker], event_date))
+                row.update(historical_surprise_features(company_history, event_date))
             price, shares = row.get("price_asof", np.nan), row.get("latest_shares_outstanding", np.nan)
             market_cap = price * shares if pd.notna(price) and pd.notna(shares) else metadata.get("market_cap", np.nan)
             enterprise_value = market_cap + row.get("latest_total_debt", 0) - row.get("latest_cash", 0)
@@ -187,8 +219,11 @@ def scan_events(config: dict, calendar: pd.DataFrame, top: int | None = None) ->
     live = _add_growth_comparisons(live)
     training_ticker_count = len(getattr(bundle, "training_tickers", ()))
     scanner_config = config.get("scanner", {})
+    model_quality_reasons = _model_quality_reasons(data_dir / "models", scanner_config)
     quality_reasons = [
-        _prediction_quality_reasons(row, training_ticker_count, scanner_config)
+        model_quality_reasons + _prediction_quality_reasons(
+            row, training_ticker_count, scanner_config
+        )
         for _, row in live.iterrows()
     ]
     live["data_quality"] = ["OK" if not reasons else "INSUFFICIENT_DATA" for reasons in quality_reasons]

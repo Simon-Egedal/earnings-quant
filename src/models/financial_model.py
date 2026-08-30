@@ -84,7 +84,7 @@ class FinancialForecaster:
             if train_mask.sum() < 10 or valid_mask.sum() < 2:
                 train_mask = y.notna() & model_y.notna()
                 valid_mask = y.notna() & model_y.notna()
-            best_name, best_rmse, scores = "", np.inf, {}
+            best_name, best_rmse, scores, selection_scores = "", np.inf, {}, {}
             for name, estimator in _regressors(self.seed).items():
                 pipeline = Pipeline([
                     ("preprocess", make_preprocessor(self.numeric_features, self.categorical_features, scale=name in {"linear", "ridge", "lasso"})),
@@ -94,20 +94,23 @@ class FinancialForecaster:
                     with warnings.catch_warnings():
                         warnings.simplefilter("error", ConvergenceWarning)
                         pipeline.fit(frame.loc[train_mask], model_y.loc[train_mask])
-                    prediction = _restore_target(
-                        frame.loc[valid_mask], target, pipeline.predict(frame.loc[valid_mask])
-                    )
+                    model_prediction = pipeline.predict(frame.loc[valid_mask])
+                    prediction = _restore_target(frame.loc[valid_mask], target, model_prediction)
                     score = float(np.sqrt(mean_squared_error(y.loc[valid_mask], prediction)))
+                    selection_score = float(np.sqrt(mean_squared_error(
+                        model_y.loc[valid_mask], model_prediction
+                    )))
                     scores[name] = score
-                    if score < best_rmse:
-                        best_name, best_rmse = name, score
+                    selection_scores[name] = selection_score
+                    if selection_score < best_rmse:
+                        best_name, best_rmse = name, selection_score
                 except (ValueError, TypeError, FloatingPointError, ConvergenceWarning):
                     continue
             if not best_name:
                 continue
             all_valid = y.notna() & model_y.notna()
             final: Pipeline | None = None
-            for candidate_name in sorted(scores, key=scores.get):
+            for candidate_name in sorted(selection_scores, key=selection_scores.get):
                 candidate = Pipeline([
                     ("preprocess", make_preprocessor(self.numeric_features, self.categorical_features, scale=candidate_name in {"linear", "ridge", "lasso"})),
                     ("model", _regressors(self.seed)[candidate_name]),
@@ -128,7 +131,9 @@ class FinancialForecaster:
                 frame.loc[all_valid], target, final.predict(frame.loc[all_valid])
             )
             self.validation_metrics[target] = {
-                "selected": best_name, "candidate_rmse": scores,
+                "selected": best_name,
+                "candidate_rmse": scores,
+                "candidate_normalized_rmse": selection_scores,
                 "mae_fit": float(mean_absolute_error(y.loc[all_valid], prediction)),
                 "rmse_fit": float(np.sqrt(mean_squared_error(y.loc[all_valid], prediction))),
                 "r2_fit": float(r2_score(y.loc[all_valid], prediction)),

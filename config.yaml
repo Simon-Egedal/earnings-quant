@@ -45,3 +45,5 @@ scanner:
   minimum_quarterly_history: 4
   minimum_annual_history: 2
   maximum_revenue_anchor_ratio: 5.0
+  minimum_walk_forward_auc: 0.52
+  minimum_walk_forward_r2: 0.0

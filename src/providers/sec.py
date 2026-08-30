@@ -38,7 +38,11 @@ CONCEPTS: dict[str, tuple[str, ...]] = {
     "current_liabilities": ("LiabilitiesCurrent",),
     "long_term_debt": ("LongTermDebtNoncurrent", "LongTermDebt"),
     "short_term_debt": ("ShortTermBorrowings", "LongTermDebtCurrent"),
-    "total_debt": ("LongTermDebtAndFinanceLeaseObligationsCurrent", "DebtCurrent"),
+    "total_debt": (
+        "DebtLongtermAndShorttermCombinedAmount",
+        "LongTermDebtAndCapitalLeaseObligationsIncludingCurrentMaturities",
+        "DebtAndCapitalLeaseObligations",
+    ),
     "stockholders_equity": ("StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"),
     "shares_outstanding": ("EntityCommonStockSharesOutstanding",),
 }
@@ -52,6 +56,30 @@ ADDITIVE_METRICS = {
     "revenue", "cost_of_revenue", "gross_profit", "operating_income", "net_income",
     "eps_diluted", "operating_cash_flow", "capital_expenditures", "free_cash_flow",
 }
+
+
+def combine_total_debt(statements: pd.DataFrame) -> pd.DataFrame:
+    """Use a true combined-debt fact, falling back to long plus short debt.
+
+    Missing debt components remain missing; absence of an XBRL tag is not proof
+    that a company has zero debt.
+    """
+    output = statements.copy()
+    direct = pd.to_numeric(
+        output.get("total_debt", pd.Series(np.nan, index=output.index)), errors="coerce"
+    )
+    components = [
+        pd.to_numeric(output[column], errors="coerce")
+        for column in ("long_term_debt", "short_term_debt")
+        if column in output
+    ]
+    parts = (
+        pd.concat(components, axis=1).sum(axis=1, min_count=1)
+        if components
+        else pd.Series(np.nan, index=output.index)
+    )
+    output["total_debt"] = direct.combine_first(parts)
+    return output
 
 
 def classify_statement_type(
@@ -269,12 +297,7 @@ class SECCompanyFactsProvider:
             frame=("frame", lambda values: next((value for value in values if pd.notna(value)), None)),
         ).reset_index()
         wide = wide.merge(period_metadata, on=index, how="left")
-        if "total_debt" not in wide:
-            wide["total_debt"] = np.nan
-        long_debt = wide["long_term_debt"].fillna(0) if "long_term_debt" in wide else pd.Series(0.0, index=wide.index)
-        short_debt = wide["short_term_debt"].fillna(0) if "short_term_debt" in wide else pd.Series(0.0, index=wide.index)
-        debt_parts = long_debt + short_debt
-        wide["total_debt"] = wide["total_debt"].fillna(debt_parts)
+        wide = combine_total_debt(wide)
         if {"operating_cash_flow", "capital_expenditures"}.issubset(wide):
             wide["free_cash_flow"] = wide["operating_cash_flow"] - wide["capital_expenditures"].abs()
         wide = derive_fourth_quarters(wide)
