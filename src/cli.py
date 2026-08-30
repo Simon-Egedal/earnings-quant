@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 from pathlib import Path
 
 import pandas as pd
@@ -29,7 +30,7 @@ def _print_frame(frame: pd.DataFrame) -> None:
         return
     display = frame.copy()
     for column in display.columns:
-        if any(word in column for word in ("return", "surprise", "probability")):
+        if any(word in column for word in ("return", "surprise", "probability", "growth", "margin")):
             display[column] = display[column].map(lambda value: f"{value:+.2%}" if pd.notna(value) else "-")
     print(display.to_string(index=False))
 
@@ -42,6 +43,10 @@ def status(config: dict) -> None:
         if path.exists():
             frame = pd.read_parquet(path)
             report[name] = {"rows": len(frame), "tickers": int(frame["ticker"].nunique()) if "ticker" in frame else None}
+            if "statement_type" in frame:
+                report[name]["statement_types"] = {
+                    str(name): int(count) for name, count in frame["statement_type"].value_counts().items()
+                }
             missing_pct = frame.isna().mean().sort_values(ascending=False)
             report[name]["most_missing_pct"] = {
                 column: round(float(rate) * 100, 1) for column, rate in missing_pct.head(5).items() if rate > 0
@@ -73,13 +78,15 @@ def parser() -> argparse.ArgumentParser:
     scan = commands.add_parser("scan", help="Rank upcoming earnings events")
     scan.add_argument("--days", type=int, default=14)
     scan.add_argument("--top", type=int, default=20)
+    commands.add_parser("tui", help="Open the interactive terminal application")
     commands.add_parser("status", help="Show local data and model status")
     return root
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
-    configure_logging(args.verbose)
+    if args.command != "tui":
+        configure_logging(args.verbose)
     config = load_config(args.config)
     ensure_directories(config)
     data_dir = Path(config["project"]["data_dir"])
@@ -110,6 +117,12 @@ def main(argv: list[str] | None = None) -> int:
         _print_frame(scan_upcoming(config, args.days, args.top))
     elif args.command == "status":
         status(config)
+    elif args.command == "tui":
+        from src.tui import EarningsQuantApp
+        logger = logging.getLogger("earnings_quant")
+        logger.handlers = [logging.NullHandler()]
+        logger.propagate = False
+        EarningsQuantApp(args.config).run()
     return 0
 
 

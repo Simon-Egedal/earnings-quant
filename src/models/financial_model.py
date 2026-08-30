@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import HistGradientBoostingRegressor, RandomForestRegressor
+from sklearn.exceptions import ConvergenceWarning
 from sklearn.linear_model import Lasso, LinearRegression, Ridge
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.pipeline import Pipeline
@@ -59,22 +61,35 @@ class FinancialForecaster:
                     ("model", estimator),
                 ])
                 try:
-                    pipeline.fit(frame.loc[train_mask], y.loc[train_mask])
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("error", ConvergenceWarning)
+                        pipeline.fit(frame.loc[train_mask], y.loc[train_mask])
                     prediction = pipeline.predict(frame.loc[valid_mask])
                     score = float(np.sqrt(mean_squared_error(y.loc[valid_mask], prediction)))
                     scores[name] = score
                     if score < best_rmse:
                         best_name, best_rmse = name, score
-                except (ValueError, TypeError, FloatingPointError):
+                except (ValueError, TypeError, FloatingPointError, ConvergenceWarning):
                     continue
             if not best_name:
                 continue
-            final = Pipeline([
-                ("preprocess", make_preprocessor(self.numeric_features, self.categorical_features, scale=best_name in {"linear", "ridge", "lasso"})),
-                ("model", _regressors(self.seed)[best_name]),
-            ])
             all_valid = y.notna()
-            final.fit(frame.loc[all_valid], y.loc[all_valid])
+            final: Pipeline | None = None
+            for candidate_name in sorted(scores, key=scores.get):
+                candidate = Pipeline([
+                    ("preprocess", make_preprocessor(self.numeric_features, self.categorical_features, scale=candidate_name in {"linear", "ridge", "lasso"})),
+                    ("model", _regressors(self.seed)[candidate_name]),
+                ])
+                try:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("error", ConvergenceWarning)
+                        candidate.fit(frame.loc[all_valid], y.loc[all_valid])
+                except (ValueError, TypeError, FloatingPointError, ConvergenceWarning):
+                    continue
+                best_name, final = candidate_name, candidate
+                break
+            if final is None:
+                continue
             self.models[target] = final
             self.selected_models[target] = best_name
             prediction = final.predict(frame.loc[all_valid])
@@ -91,4 +106,3 @@ class FinancialForecaster:
         for target, model in self.models.items():
             result[f"predicted_{target.removeprefix('actual_')}"] = model.predict(frame)
         return result
-

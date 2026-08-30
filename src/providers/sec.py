@@ -48,6 +48,92 @@ INSTANT_METRICS = {
     "short_term_debt", "total_debt", "stockholders_equity", "shares_outstanding",
 }
 
+ADDITIVE_METRICS = {
+    "revenue", "cost_of_revenue", "gross_profit", "operating_income", "net_income",
+    "eps_diluted", "operating_cash_flow", "capital_expenditures", "free_cash_flow",
+}
+
+
+def classify_statement_type(
+    form: str, fiscal_period: str | None, duration_days: int | None, *, instant: bool = False
+) -> str:
+    """Classify an SEC fact without mixing quarter, YTD, and annual durations."""
+    normalized_form = str(form).upper().removesuffix("/A")
+    normalized_period = str(fiscal_period or "").upper()
+    if instant:
+        return "annual" if normalized_form == "10-K" or normalized_period == "FY" else "quarterly"
+    if duration_days is None:
+        return "other"
+    if normalized_form == "10-Q":
+        return "quarterly" if duration_days <= 150 else "year_to_date"
+    if normalized_form == "10-K":
+        if duration_days >= 250:
+            return "annual"
+        return "quarterly" if duration_days <= 150 else "year_to_date"
+    if normalized_period == "FY" and duration_days >= 250:
+        return "annual"
+    return "quarterly" if duration_days <= 150 else "year_to_date"
+
+
+def derive_fourth_quarters(statements: pd.DataFrame) -> pd.DataFrame:
+    """Derive missing standalone Q4 values as annual less the first three quarters."""
+    if statements.empty or "statement_type" not in statements:
+        return statements
+    derived: list[dict[str, Any]] = []
+    annuals = statements.loc[statements["statement_type"].eq("annual")]
+    for _, annual in annuals.iterrows():
+        annual_start = pd.to_datetime(annual.get("period_start"), errors="coerce")
+        annual_end = pd.to_datetime(annual.get("period_end"), errors="coerce")
+        annual_filed = pd.to_datetime(annual.get("filed_at"), errors="coerce")
+        if pd.isna(annual_start) or pd.isna(annual_end) or pd.isna(annual_filed):
+            continue
+        quarter_ends = pd.to_datetime(statements["period_end"], errors="coerce")
+        quarter_filed = pd.to_datetime(statements["filed_at"], errors="coerce")
+        quarters = statements.loc[
+            statements["statement_type"].eq("quarterly")
+            & quarter_ends.ge(annual_start) & quarter_ends.lt(annual_end)
+            & quarter_filed.le(annual_filed)
+        ].copy()
+        if quarters.empty:
+            continue
+        quarters["_period_end"] = quarter_ends.loc[quarters.index]
+        quarters["_filed_at"] = quarter_filed.loc[quarters.index]
+        duration_columns = [metric for metric in ADDITIVE_METRICS if metric in quarters]
+        quarters = quarters.loc[quarters[duration_columns].notna().any(axis=1)]
+        selected_periods = sorted(quarters["_period_end"].dropna().unique())[-3:]
+        if len(selected_periods) != 3:
+            continue
+        record = annual.to_dict()
+        last_quarter_end = pd.Timestamp(selected_periods[-1])
+        record.update({
+            "period_start": last_quarter_end + pd.DateOffset(days=1),
+            "duration_days": int((annual_end - last_quarter_end).days),
+            "fiscal_period": "Q4",
+            "form": "DERIVED-Q4",
+            "accession": f"{annual.get('accession')}:Q4",
+            "statement_type": "quarterly",
+            "frame": None,
+        })
+        for metric in ADDITIVE_METRICS:
+            if metric not in statements:
+                continue
+            annual_value = pd.to_numeric(pd.Series([annual.get(metric)]), errors="coerce").iloc[0]
+            quarter_values: list[float] = []
+            for period in selected_periods:
+                observations = quarters.loc[quarters["_period_end"].eq(period)].sort_values("_filed_at")[metric]
+                observations = pd.to_numeric(observations, errors="coerce").dropna()
+                quarter_values.append(float(observations.iloc[-1]) if not observations.empty else np.nan)
+            record[metric] = (
+                float(annual_value - sum(quarter_values))
+                if pd.notna(annual_value) and all(pd.notna(value) for value in quarter_values)
+                else np.nan
+            )
+        if pd.notna(record.get("revenue", np.nan)) or pd.notna(record.get("eps_diluted", np.nan)):
+            derived.append(record)
+    if not derived:
+        return statements
+    return pd.concat([statements, pd.DataFrame(derived)], ignore_index=True)
+
 
 class SECCompanyFactsProvider:
     """Rate-limited SEC Company Facts client with disk caching."""
@@ -108,7 +194,8 @@ class SECCompanyFactsProvider:
                 return units[preferred]
         return next(iter(units.values()), [])
 
-    def quarterly_fundamentals(self, ticker: str, refresh: bool = False) -> pd.DataFrame:
+    def fundamentals(self, ticker: str, refresh: bool = False) -> pd.DataFrame:
+        """Collect quarterly, annual, and YTD SEC facts with explicit cadence metadata."""
         payload = self.company_facts(ticker, refresh)
         gaap = payload.get("facts", {}).get("us-gaap", {})
         dei = payload.get("facts", {}).get("dei", {})
@@ -125,30 +212,63 @@ class SECCompanyFactsProvider:
                     start, end = item.get("start"), item.get("end")
                     if not end or item.get("val") is None:
                         continue
+                    duration: int | None = None
                     if metric not in INSTANT_METRICS:
                         if not start:
                             continue
                         duration = (pd.Timestamp(end) - pd.Timestamp(start)).days
-                        if duration > 150:  # Excludes year-to-date and annual duration facts.
-                            continue
+                    statement_type = classify_statement_type(
+                        form, item.get("fp"), duration, instant=metric in INSTANT_METRICS
+                    )
                     rows.append({
                         "ticker": ticker.upper(), "metric": metric, "concept": alias,
                         "priority": priority, "period_end": end, "filed_at": item.get("filed"),
+                        "filed_date": item.get("filed"),
                         "fiscal_year": item.get("fy"), "fiscal_period": item.get("fp"),
                         "form": form, "accession": item.get("accn"), "value": item["val"],
+                        "statement_type": statement_type, "period_start": start,
+                        "duration_days": duration, "frame": item.get("frame"),
                     })
         if not rows:
             return pd.DataFrame()
         long = pd.DataFrame(rows)
         long["period_end"] = pd.to_datetime(long["period_end"], errors="coerce")
-        long["filed_at"] = pd.to_datetime(long["filed_at"], errors="coerce")
+        long["filed_date"] = pd.to_datetime(long["filed_date"], errors="coerce")
+        # Company Facts exposes a date, not a dissemination timestamp. Treat the
+        # fact as visible only after that calendar day to avoid same-day leakage.
+        long["filed_at"] = long["filed_date"] + pd.DateOffset(days=1)
+        long["period_start"] = pd.to_datetime(long["period_start"], errors="coerce")
         long = long.dropna(subset=["period_end", "filed_at", "accession"])
+        duration_periods = long.loc[
+            ~long["metric"].isin(INSTANT_METRICS),
+            ["accession", "statement_type", "period_end"],
+        ].drop_duplicates()
+        for row_index in long.index[long["metric"].isin(INSTANT_METRICS)]:
+            row = long.loc[row_index]
+            candidates = duration_periods.loc[
+                (duration_periods["accession"] == row["accession"])
+                & (duration_periods["statement_type"] == row["statement_type"])
+            ]
+            if candidates.empty:
+                continue
+            distances = (candidates["period_end"] - row["period_end"]).dt.days.abs()
+            if distances.min() <= 45:
+                long.at[row_index, "period_end"] = candidates.loc[distances.idxmin(), "period_end"]
         long = long.sort_values(["priority", "filed_at"]).drop_duplicates(
-            ["accession", "period_end", "metric"], keep="first"
+            ["accession", "period_end", "statement_type", "metric"], keep="first"
         )
-        index = ["ticker", "period_end", "filed_at", "fiscal_year", "fiscal_period", "form", "accession"]
+        index = [
+            "ticker", "period_end", "filed_at", "fiscal_year", "fiscal_period",
+            "form", "accession", "statement_type", "filed_date",
+        ]
         wide = long.pivot_table(index=index, columns="metric", values="value", aggfunc="last").reset_index()
         wide.columns.name = None
+        period_metadata = long.groupby(index, dropna=False).agg(
+            period_start=("period_start", "min"),
+            duration_days=("duration_days", "max"),
+            frame=("frame", lambda values: next((value for value in values if pd.notna(value)), None)),
+        ).reset_index()
+        wide = wide.merge(period_metadata, on=index, how="left")
         if "total_debt" not in wide:
             wide["total_debt"] = np.nan
         long_debt = wide["long_term_debt"].fillna(0) if "long_term_debt" in wide else pd.Series(0.0, index=wide.index)
@@ -157,5 +277,11 @@ class SECCompanyFactsProvider:
         wide["total_debt"] = wide["total_debt"].fillna(debt_parts)
         if {"operating_cash_flow", "capital_expenditures"}.issubset(wide):
             wide["free_cash_flow"] = wide["operating_cash_flow"] - wide["capital_expenditures"].abs()
-        log("DATA", "%d quarterly SEC reports loaded for %s", len(wide), ticker.upper())
+        wide = derive_fourth_quarters(wide)
+        counts = wide["statement_type"].value_counts().to_dict()
+        log("DATA", "%d SEC statement periods loaded for %s: %s", len(wide), ticker.upper(), counts)
         return wide.sort_values(["filed_at", "period_end"]).reset_index(drop=True)
+
+    def quarterly_fundamentals(self, ticker: str, refresh: bool = False) -> pd.DataFrame:
+        """Backward-compatible alias; returned rows now include all statement cadences."""
+        return self.fundamentals(ticker, refresh)

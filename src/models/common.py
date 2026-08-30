@@ -24,7 +24,7 @@ def available_features(frame: pd.DataFrame, extra_exclude: Iterable[str] = ()) -
         column for column in frame.columns
         if column not in excluded and not any(column.startswith(prefix) for prefix in LEAKAGE_PREFIXES)
     ]
-    categorical = [column for column in ("sector", "industry") if column in candidates]
+    categorical = [column for column in ("sector", "industry", "statement_type") if column in candidates]
     numeric = [column for column in candidates if column not in categorical and pd.api.types.is_numeric_dtype(frame[column])]
     return numeric, categorical
 

@@ -34,7 +34,7 @@ def collect_data(
     for index, ticker in enumerate(universe, 1):
         log("DATA", "%d/%d collecting %s", index, len(universe), ticker)
         try:
-            frame = sec.quarterly_fundamentals(ticker, refresh)
+            frame = sec.fundamentals(ticker, refresh)
             if not frame.empty:
                 fundamentals.append(frame)
         except Exception as exc:
@@ -58,7 +58,9 @@ def collect_data(
         except Exception as exc:
             log("WARN", "Price batch beginning %s skipped: %s", batch[0], exc)
     outputs = {
-        "fundamentals": _combine(fundamentals, ["ticker", "period_end", "filed_at", "accession"]),
+        "fundamentals": _combine(
+            fundamentals, ["ticker", "period_end", "filed_at", "accession", "statement_type"]
+        ),
         "earnings": _combine(earnings, ["ticker", "earnings_date"]),
         "prices": _combine(price_frames, ["ticker", "date"]),
         "metadata": pd.DataFrame(metadata).drop_duplicates("ticker", keep="last") if metadata else pd.DataFrame(),
@@ -73,4 +75,3 @@ def collect_data(
         counts[name] = len(frame)
     log("DATA", "Collection complete: %s", counts)
     return counts
-

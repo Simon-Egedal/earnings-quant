@@ -9,5 +9,5 @@ pyarrow>=17
 matplotlib>=3.9
 joblib>=1.4
 PyYAML>=6.0
+textual>=1.0
 pytest>=8.3
-

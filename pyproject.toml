@@ -10,8 +10,12 @@ requires-python = ">=3.12"
 dependencies = [
   "pandas>=2.2", "numpy>=2.0", "scipy>=1.13", "scikit-learn>=1.5",
   "statsmodels>=0.14", "yfinance>=1.0", "requests>=2.32",
-  "pyarrow>=17", "matplotlib>=3.9", "joblib>=1.4", "PyYAML>=6.0"
+  "pyarrow>=17", "matplotlib>=3.9", "joblib>=1.4", "PyYAML>=6.0",
+  "textual>=1.0"
 ]
+
+[project.scripts]
+earnings-quant = "src.cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.3"]
@@ -20,4 +24,3 @@ xgboost = ["xgboost>=2.1"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
-

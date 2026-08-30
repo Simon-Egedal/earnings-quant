@@ -7,7 +7,7 @@ import pandas as pd
 
 from src.logging_utils import log
 from .analyst import historical_surprise_features
-from .fundamentals import point_in_time_fundamentals, safe_divide
+from .fundamentals import infer_next_statement_type, point_in_time_fundamentals, safe_divide
 from .market import event_returns, market_features
 
 
@@ -18,14 +18,24 @@ class EventDatasetBuilder:
         self.benchmark = benchmark
 
     @staticmethod
-    def _future_report(fundamentals: pd.DataFrame, event_date: pd.Timestamp) -> pd.Series | None:
+    def _future_report(
+        fundamentals: pd.DataFrame, event_date: pd.Timestamp, statement_type: str | None = None
+    ) -> pd.Series | None:
         filed = pd.to_datetime(fundamentals["filed_at"], utc=True, errors="coerce")
         cutoff = pd.Timestamp(event_date)
         cutoff = cutoff.tz_localize("UTC") if cutoff.tzinfo is None else cutoff.tz_convert("UTC")
         period_end = pd.to_datetime(fundamentals["period_end"], utc=True, errors="coerce")
+        cadence = fundamentals.get("statement_type")
+        if cadence is None:
+            cadence_mask = pd.Series(True, index=fundamentals.index)
+        elif statement_type:
+            cadence_mask = cadence.eq(statement_type)
+        else:
+            cadence_mask = cadence.isin(["quarterly", "annual"])
         candidates = fundamentals.loc[
             (filed >= cutoff) & (filed <= cutoff + timedelta(days=90))
             & (period_end >= cutoff - timedelta(days=150)) & (period_end <= cutoff + timedelta(days=15))
+            & cadence_mask
         ].copy()
         if candidates.empty:
             return None
@@ -39,10 +49,21 @@ class EventDatasetBuilder:
             company_fundamentals = fundamentals.loc[fundamentals["ticker"] == ticker]
             for _, event in company_events.sort_values("earnings_date").iterrows():
                 event_date = pd.Timestamp(event["earnings_date"])
-                features, visible = point_in_time_fundamentals(company_fundamentals, event_date)
+                inferred_type, expected_period = infer_next_statement_type(company_fundamentals, event_date)
+                report = self._future_report(company_fundamentals, event_date, inferred_type)
+                statement_type = str(report.get("statement_type", inferred_type)) if report is not None else inferred_type
+                expected_period = "FY" if statement_type == "annual" else expected_period
+                features, visible = point_in_time_fundamentals(company_fundamentals, event_date, statement_type)
                 if not features:
                     continue
                 row = event.to_dict()
+                row["statement_type"] = statement_type
+                row["expected_fiscal_period"] = expected_period
+                if statement_type == "annual":
+                    row["quarterly_consensus_eps"] = row.get("consensus_eps", np.nan)
+                    row["quarterly_consensus_revenue"] = row.get("consensus_revenue", np.nan)
+                    row["consensus_eps"] = row.get("annual_consensus_eps", np.nan)
+                    row["consensus_revenue"] = row.get("annual_consensus_revenue", np.nan)
                 row.update(features)
                 row.update(historical_surprise_features(company_events, event_date))
                 row.update(market_features(prices, ticker, event_date, self.benchmark))
@@ -54,19 +75,18 @@ class EventDatasetBuilder:
                 row.update({
                     "market_cap_event": market_cap,
                     "pe": safe_divide(price, row.get("ttm_eps", np.nan)),
-                    "forward_pe": safe_divide(price, event.get("consensus_eps", np.nan) * 4),
+                    "forward_pe": safe_divide(price, row.get("consensus_eps", np.nan) * (1 if statement_type == "annual" else 4)),
                     "price_to_sales": safe_divide(market_cap, row.get("ttm_revenue", np.nan)),
                     "ev_to_revenue": safe_divide(enterprise_value, row.get("ttm_revenue", np.nan)),
                     "price_to_book": safe_divide(market_cap, row.get("latest_stockholders_equity", np.nan)),
                     "fcf_yield": safe_divide(row.get("ttm_free_cash_flow", np.nan), market_cap),
                 })
-                report = self._future_report(company_fundamentals, event_date)
                 if report is not None:
                     row["actual_revenue"] = report.get("revenue", np.nan)
                     row["actual_operating_margin"] = safe_divide(report.get("operating_income", np.nan), report.get("revenue", np.nan))
                     row["actual_fcf"] = report.get("free_cash_flow", np.nan)
                     row["target_filed_at"] = report.get("filed_at")
-                    if pd.isna(row.get("actual_eps", np.nan)):
+                    if pd.notna(report.get("eps_diluted", np.nan)):
                         row["actual_eps"] = report.get("eps_diluted", np.nan)
                 row["max_feature_filed_at"] = visible["filed_at"].max()
                 row["event_year"] = event_date.year

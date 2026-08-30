@@ -125,11 +125,15 @@ class YahooFinanceProvider:
             try:
                 table = getattr(instrument, method_name)()
                 if table is not None and not table.empty:
-                    row = table.loc["0q"] if "0q" in table.index else table.iloc[0]
-                    output.update({f"{prefix}_{_snake(key)}": value for key, value in row.items()})
+                    quarterly = table.loc["0q"] if "0q" in table.index else table.iloc[0]
+                    output.update({f"{prefix}_{_snake(key)}": value for key, value in quarterly.items()})
+                    if "0y" in table.index:
+                        annual = table.loc["0y"]
+                        output.update({f"annual_{prefix}_{_snake(key)}": value for key, value in annual.items()})
             except Exception:
                 continue
         output.setdefault("consensus_eps", output.get("eps_current"))
         output.setdefault("consensus_revenue", output.get("revenue_avg"))
+        output.setdefault("annual_consensus_eps", output.get("annual_eps_current"))
+        output.setdefault("annual_consensus_revenue", output.get("annual_revenue_avg"))
         return output
-

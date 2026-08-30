@@ -73,6 +73,33 @@ The SEC asks automated clients to declare a User-Agent and currently caps automa
 
 ## Workflow
 
+### Interactive terminal application
+
+After collecting data, building the dataset, and training the models, open the keyboard-driven TUI:
+
+```powershell
+python -m src.cli tui
+```
+
+The application loads the upcoming earnings calendar. Use the arrow keys and `Enter` to select a company (or type its ticker), then choose **Analyze selected**. The forecast table compares the model with analyst consensus and shows:
+
+- predicted EPS and year-over-year EPS growth;
+- predicted revenue and year-over-year revenue growth;
+- predicted operating margin and free cash flow;
+- EPS/revenue differences versus analyst consensus;
+- expected abnormal three-session return, probability of an up move, confidence, and signal.
+
+Use `R` to refresh the calendar, `Ctrl+S` to analyze, and `Q` to quit. The TUI calls the same scanner and trained model bundle as the existing `scan` command; it does not retrain or change model logic while analyzing a ticker.
+
+For first-time setup:
+
+```powershell
+python -m src.cli collect
+python -m src.cli build-dataset
+python -m src.cli train
+python -m src.cli tui
+```
+
 For a quick development run:
 
 ```powershell
@@ -115,13 +142,13 @@ results/            backtest rows and grouped statistics
 results/charts/     cumulative return, drawdown, calibration, importance, hit rate, buckets
 ```
 
-Historical fundamentals come from the SEC's `data.sec.gov/api/xbrl/companyfacts` endpoint. Concept aliases are normalized to a stable internal schema. Duration facts longer than 150 days are excluded so year-to-date and annual values are not mistaken for standalone quarters. Instantaneous balance-sheet facts are retained. Free cash flow is operating cash flow minus absolute capital expenditure.
+Historical fundamentals come from the SEC's `data.sec.gov/api/xbrl/companyfacts` endpoint. Concept aliases are normalized to a stable internal schema. Every fact is classified as `quarterly`, `annual`, `year_to_date`, or `other` using its filing form and duration; period start, duration, SEC frame, fiscal period, and form are retained. Year-to-date values are stored for auditability but never mixed into quarterly or annual model snapshots. Because Company Facts supplies a filing date rather than an exact dissemination time, the original `filed_date` is retained and `filed_at` conservatively makes the data available after that date ends, preventing a same-day earnings event from seeing its own filing. Instantaneous balance-sheet facts are aligned to the nearest statement period in the same filing. When a 10-K does not disclose standalone fourth-quarter income-statement values, Q4 additive values are derived as the annual total minus Q1–Q3. Free cash flow is operating cash flow minus absolute capital expenditure.
 
 Yahoo/yfinance supplies adjusted and raw prices, event dates, historical EPS estimates/actuals where available, current estimates and revisions, metadata, and the upcoming US earnings calendar. Provider fields are optional: a missing estimate or failed ticker is logged and does not stop collection.
 
 ## Point-in-time methodology
 
-Each historical row represents one company earnings event. The feature builder converts all timestamps to UTC and only admits a financial filing when:
+Each historical row represents one company earnings event. The feature builder first determines whether the event corresponds to a quarterly statement or the annual statement following fiscal Q3. It then uses only matching-cadence history: quarterly features use standalone quarters and four-quarter trailing sums, while annual features use full-year history and the latest annual value. The statement cadence is also supplied to model training as a categorical feature. All timestamps are converted to UTC and a financial filing is admitted only when:
 
 ```text
 filing filed_at < earnings event timestamp
@@ -165,7 +192,7 @@ This is an event-study backtest: signals can overlap, and the cumulative curve c
 
 ## Scanner output
 
-The scanner fetches all qualifying calendar pages (Yahoo caps each page at 100), refreshes current analyst data, calculates current point-in-time features, runs both models, and ranks by absolute expected abnormal return, confidence, then market cap. Output includes ticker, company, date/timing, sector, consensus and predicted EPS/revenue, predicted surprises, predicted 3D return, probability up, confidence, and signal.
+The scanner fetches all qualifying calendar pages (Yahoo caps each page at 100), refreshes current quarterly and annual analyst data, infers the upcoming fiscal statement cadence from the latest visible filing, calculates matching point-in-time features, runs both models, and ranks by absolute expected abnormal return, confidence, then market cap. Output includes statement type/fiscal period, ticker, company, date/timing, sector, cadence-matched consensus and predicted EPS/revenue, predicted growth and surprises, predicted 3D return, probability up, confidence, and signal.
 
 ## Important limitations
 
@@ -189,4 +216,3 @@ python -m pytest
 ```
 
 The suite covers feature calculations, strict filing visibility, provenance auditing, two-stage model fit/prediction, chronological folds, signal thresholds, and trading costs. Add a regression test whenever a provider schema or timing rule changes.
-
