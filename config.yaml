@@ -11,6 +11,7 @@ sec:
 
 universe:
   source: sp500
+  target_size: 100
   minimum_market_cap: 2000000000
   tickers: []
 

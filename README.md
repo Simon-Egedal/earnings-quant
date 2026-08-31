@@ -110,7 +110,7 @@ python -m src.cli status
 
 The five-ticker development run is suitable for testing the pipeline, but it is intentionally too small to emit live `LONG` or `SHORT` signals. By default, the scanner requires a model trained on at least 20 distinct tickers. Run collection on the configured universe and retrain before using scanner signals.
 
-For the configured S&P 500 universe:
+For the configured deterministic 100-stock sample of the S&P 500 universe:
 
 ```powershell
 python -m src.cli collect
@@ -121,7 +121,7 @@ python -m src.cli backtest
 python -m src.cli scan --days 14 --top 20
 ```
 
-Collection across hundreds of companies can take a long time because requests are intentionally throttled and failures are isolated per ticker. Use `--limit 25` for an initial pipeline check and rerun without `--refresh` to reuse the cache.
+Collection across 100 companies can take a while because requests are intentionally throttled and failures are isolated per ticker. Change `universe.target_size` to adjust the normal sample size, use `--limit 25` for an initial pipeline check, and rerun without `--refresh` to reuse the cache. An undersized cached fallback universe is refreshed automatically.
 
 Other useful commands:
 

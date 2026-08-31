@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.data.universe import load_universe
+from src.data.universe import load_universe, select_universe
 from src.logging_utils import log
 from src.providers import SECCompanyFactsProvider, YahooFinanceProvider
 from src.storage import record_artifact, write_parquet_atomic
@@ -23,13 +23,33 @@ def _merge_existing(frame: pd.DataFrame, path: Path, keys: list[str]) -> pd.Data
     return _combine([existing, frame], keys)
 
 
+def _collected_tickers(data_dir: Path) -> list[str]:
+    """Return cached symbols so a larger run fills around prior work."""
+    collected: list[str] = []
+    for name in ("metadata", "earnings", "fundamentals"):
+        path = data_dir / "raw" / f"{name}.parquet"
+        if not path.exists():
+            continue
+        frame = pd.read_parquet(path, columns=["ticker"])
+        collected.extend(frame["ticker"].dropna().astype(str).str.upper().tolist())
+    return list(dict.fromkeys(collected))
+
+
 def collect_data(
     config: dict, tickers: list[str] | None = None, limit: int | None = None, refresh: bool = False
 ) -> dict[str, int]:
     data_dir = Path(config["project"]["data_dir"])
     cache_dir = data_dir / "cache"
+    explicit_tickers = bool(tickers)
     universe = tickers or load_universe(config["universe"], cache_dir, refresh)
-    universe = universe[:limit] if limit else universe
+    if explicit_tickers:
+        universe = universe[:limit] if limit else universe
+    else:
+        target_size = limit if limit is not None else int(config["universe"].get("target_size", 100))
+        seed = int(config.get("project", {}).get("random_seed", 42))
+        universe = select_universe(
+            universe, target_size, seed, preferred=_collected_tickers(data_dir)
+        )
     yahoo = YahooFinanceProvider()
     sec = SECCompanyFactsProvider(
         cache_dir, config["sec"]["user_agent"], config["sec"]["requests_per_second"], config["sec"]["cache_days"]

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from src.data.collector import _merge_existing
+from src.data.collector import _collected_tickers, _merge_existing
 
 
 def test_partial_collection_keeps_existing_tickers_and_replaces_updated_rows(tmp_path) -> None:
@@ -24,3 +24,12 @@ def test_partial_collection_keeps_existing_tickers_and_replaces_updated_rows(tmp
 
     assert set(merged["ticker"]) == {"AAPL", "MSFT"}
     assert merged.loc[merged["ticker"].eq("AAPL"), "close"].item() == 101.0
+
+
+def test_collected_tickers_are_deduplicated_across_raw_artifacts(tmp_path) -> None:
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    pd.DataFrame({"ticker": ["AAPL", "MSFT"]}).to_parquet(raw / "metadata.parquet")
+    pd.DataFrame({"ticker": ["MSFT", "NVDA"]}).to_parquet(raw / "earnings.parquet")
+
+    assert _collected_tickers(tmp_path) == ["AAPL", "MSFT", "NVDA"]
