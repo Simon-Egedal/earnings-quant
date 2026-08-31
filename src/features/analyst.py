@@ -6,6 +6,95 @@ import pandas as pd
 from .fundamentals import safe_divide
 
 
+def _consensus_from_surprise(actual: object, surprise_pct: object) -> float:
+    """Recover an unambiguous EPS estimate from Yahoo's reported surprise.
+
+    Yahoo defines surprise as ``(actual - estimate) / abs(estimate)``.  The
+    absolute value makes some extreme sign-crossing observations ambiguous;
+    those cases deliberately remain missing instead of guessing.
+    """
+    actual_value = pd.to_numeric(pd.Series([actual]), errors="coerce").iloc[0]
+    surprise_value = pd.to_numeric(pd.Series([surprise_pct]), errors="coerce").iloc[0]
+    if pd.isna(actual_value) or pd.isna(surprise_value):
+        return np.nan
+    ratio = float(surprise_value) / 100.0
+    candidates: list[float] = []
+    positive_denominator = 1.0 + ratio
+    if not np.isclose(positive_denominator, 0.0):
+        candidate = float(actual_value) / positive_denominator
+        if candidate > 0 and np.isfinite(candidate):
+            candidates.append(candidate)
+    negative_denominator = 1.0 - ratio
+    if not np.isclose(negative_denominator, 0.0):
+        candidate = float(actual_value) / negative_denominator
+        if candidate < 0 and np.isfinite(candidate):
+            candidates.append(candidate)
+    return candidates[0] if len(candidates) == 1 else np.nan
+
+
+def enrich_historical_consensus(events: pd.DataFrame) -> pd.DataFrame:
+    """Add leakage-safe consensus coverage and provenance to earnings history.
+
+    Historical Yahoo earnings rows normally contain quarterly EPS consensus
+    but no annual estimate.  An annual proxy is therefore built from the four
+    quarterly estimates that were each observable by their event date.  The
+    same derivation is supported for revenue whenever a provider supplies
+    historical quarterly revenue consensus.
+    """
+    output = events.copy()
+    if output.empty:
+        return output
+    for metric in ("eps", "revenue"):
+        column = f"consensus_{metric}"
+        if column not in output:
+            output[column] = np.nan
+        output[column] = pd.to_numeric(output[column], errors="coerce")
+
+    eps_source = pd.Series(
+        np.where(output["consensus_eps"].notna(), "yahoo_historical", "missing"),
+        index=output.index,
+        dtype="object",
+    )
+    if {"actual_eps", "eps_surprise_pct"}.issubset(output):
+        missing = output["consensus_eps"].isna()
+        recovered = pd.Series([
+            _consensus_from_surprise(actual, surprise)
+            for actual, surprise in zip(output["actual_eps"], output["eps_surprise_pct"])
+        ], index=output.index, dtype=float)
+        usable = missing & recovered.notna()
+        output.loc[usable, "consensus_eps"] = recovered.loc[usable]
+        eps_source.loc[usable] = "derived_from_yahoo_surprise"
+    output["consensus_eps_source"] = eps_source
+    output["consensus_revenue_source"] = np.where(
+        output["consensus_revenue"].notna(), "yahoo_historical", "missing"
+    )
+
+    ticker = output["ticker"].astype(str) if "ticker" in output else pd.Series("", index=output.index)
+    dates = pd.to_datetime(output["earnings_date"], utc=True, errors="coerce")
+    ordered = output.assign(_ticker=ticker, _earnings_date=dates).sort_values(
+        ["_ticker", "_earnings_date"]
+    )
+    for metric in ("eps", "revenue"):
+        quarterly = f"consensus_{metric}"
+        annual = f"annual_consensus_{metric}"
+        annual_source = f"annual_consensus_{metric}_source"
+        if annual not in output:
+            output[annual] = np.nan
+        output[annual] = pd.to_numeric(output[annual], errors="coerce")
+        rolling = ordered.groupby("_ticker", sort=False)[quarterly].transform(
+            lambda values: values.rolling(4, min_periods=4).sum()
+        )
+        rolling = rolling.reindex(output.index)
+        derived = output[annual].isna() & rolling.notna()
+        output.loc[derived, annual] = rolling.loc[derived]
+        output[annual_source] = np.where(
+            derived,
+            "derived_trailing_quarterly_consensus",
+            np.where(output[annual].notna(), "provider", "missing"),
+        )
+    return output
+
+
 def historical_eps_features(
     events: pd.DataFrame, as_of: pd.Timestamp, statement_type: str = "quarterly"
 ) -> dict[str, float]:

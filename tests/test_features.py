@@ -4,7 +4,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.features.analyst import aligned_actual_eps, historical_eps_features, historical_surprise_features
+from src.features.analyst import (
+    aligned_actual_eps,
+    enrich_historical_consensus,
+    historical_eps_features,
+    historical_surprise_features,
+)
 from src.features.fundamentals import point_in_time_fundamentals
 from src.features.market import event_returns, market_features
 
@@ -83,3 +88,36 @@ def test_missing_surprise_is_not_counted_as_an_earnings_miss() -> None:
     features = historical_surprise_features(events, pd.Timestamp("2024-01-01", tz="UTC"))
 
     assert features["earnings_beat_rate_4"] == pytest.approx(0.5)
+
+
+def test_historical_consensus_recovers_eps_and_builds_point_in_time_annual_proxy() -> None:
+    events = pd.DataFrame({
+        "ticker": "TEST",
+        "earnings_date": pd.date_range("2023-01-01", periods=5, freq="QE", tz="UTC"),
+        "consensus_eps": [1.0, 1.1, np.nan, 1.3, 99.0],
+        "actual_eps": [1.1, 1.2, 1.32, 1.4, 99.0],
+        "eps_surprise_pct": [10.0, None, 10.0, None, None],
+    })
+
+    enriched = enrich_historical_consensus(events)
+
+    assert enriched.loc[2, "consensus_eps"] == pytest.approx(1.2)
+    assert enriched.loc[2, "consensus_eps_source"] == "derived_from_yahoo_surprise"
+    assert enriched.loc[3, "annual_consensus_eps"] == pytest.approx(4.6)
+    assert enriched.loc[3, "annual_consensus_eps_source"] == "derived_trailing_quarterly_consensus"
+    # A later estimate must not change the annual proxy available at row 3.
+    assert enriched.loc[3, "annual_consensus_eps"] != enriched.loc[4, "annual_consensus_eps"]
+
+
+def test_ambiguous_sign_crossing_surprise_does_not_invent_consensus() -> None:
+    events = pd.DataFrame({
+        "ticker": ["TEST"],
+        "earnings_date": [pd.Timestamp("2024-01-01", tz="UTC")],
+        "consensus_eps": [np.nan],
+        "actual_eps": [1.0],
+        "eps_surprise_pct": [200.0],
+    })
+
+    enriched = enrich_historical_consensus(events)
+
+    assert pd.isna(enriched.loc[0, "consensus_eps"])

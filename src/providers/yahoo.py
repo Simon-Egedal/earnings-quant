@@ -74,7 +74,14 @@ class YahooFinanceProvider:
             "earnings_date": "earnings_date", "eps_estimate": "consensus_eps",
             "reported_eps": "actual_eps", "surprise(pct)": "eps_surprise_pct",
             "surprise_(pct)": "eps_surprise_pct",
+            "revenue_estimate": "consensus_revenue",
+            "reported_revenue": "actual_revenue_yahoo",
+            "revenue_surprise(pct)": "revenue_surprise_pct",
+            "revenue_surprise_(pct)": "revenue_surprise_pct",
         })
+        for column in ("consensus_eps", "consensus_revenue"):
+            if column not in frame:
+                frame[column] = pd.NA
         frame["ticker"] = ticker.upper()
         frame["earnings_date"] = pd.to_datetime(frame["earnings_date"], utc=True, errors="coerce")
         frame["timing"] = [event_timing(value) for value in frame["earnings_date"]]

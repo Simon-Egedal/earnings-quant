@@ -176,6 +176,10 @@ def scan_events(config: dict, calendar: pd.DataFrame, top: int | None = None) ->
                 row["quarterly_consensus_revenue"] = row.get("consensus_revenue", np.nan)
                 row["consensus_eps"] = row.get("annual_consensus_eps", np.nan)
                 row["consensus_revenue"] = row.get("annual_consensus_revenue", np.nan)
+            row["consensus_eps_available"] = float(pd.notna(row.get("consensus_eps")))
+            row["consensus_revenue_available"] = float(pd.notna(row.get("consensus_revenue")))
+            row["consensus_eps_is_derived"] = 0.0
+            row["consensus_revenue_is_derived"] = 0.0
             if not historical.empty:
                 company_history = historical[historical["ticker"] == ticker]
                 row.update(historical_eps_features(company_history, event_date, statement_type))

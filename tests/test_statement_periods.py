@@ -136,6 +136,45 @@ def test_dataset_uses_annual_target_for_event_after_q3(quarterly_fundamentals, p
     assert pd.isna(dataset.loc[0, "consensus_eps"])
 
 
+def test_dataset_uses_trailing_quarterly_consensus_for_annual_event(
+    quarterly_fundamentals, prices
+) -> None:
+    quarterly = quarterly_fundamentals.copy()
+    quarterly["statement_type"] = "quarterly"
+    prior_annual = quarterly.iloc[-1].copy()
+    prior_annual.update({
+        "period_end": pd.Timestamp("2022-12-31"), "filed_at": pd.Timestamp("2023-02-15"),
+        "fiscal_period": "FY", "form": "10-K", "accession": "annual-2022",
+        "statement_type": "annual", "revenue": 600.0, "eps_diluted": 5.0,
+    })
+    future_annual = prior_annual.copy()
+    future_annual.update({
+        "period_end": pd.Timestamp("2023-12-31"), "filed_at": pd.Timestamp("2024-02-15"),
+        "accession": "annual-2023", "revenue": 700.0, "eps_diluted": 6.0,
+    })
+    fundamentals = pd.concat(
+        [quarterly, pd.DataFrame([prior_annual, future_annual])], ignore_index=True
+    )
+    earnings = pd.DataFrame({
+        "ticker": "TEST",
+        "earnings_date": pd.to_datetime([
+            "2023-04-25", "2023-07-25", "2023-10-25", "2024-01-25"
+        ], utc=True),
+        "actual_eps": [1.0, 1.1, 1.2, 1.5],
+        "consensus_eps": [0.9, 1.0, 1.1, 1.4],
+        "timing": "After Market Close",
+    })
+
+    dataset = EventDatasetBuilder().build(fundamentals, earnings, prices)
+    annual = dataset.loc[dataset["earnings_date"].eq(earnings["earnings_date"].iloc[-1])].iloc[0]
+
+    assert annual["statement_type"] == "annual"
+    assert annual["quarterly_consensus_eps"] == 1.4
+    assert annual["consensus_eps"] == 4.4
+    assert annual["consensus_eps_available"] == 1.0
+    assert annual["consensus_eps_is_derived"] == 1.0
+
+
 def test_live_analyst_snapshot_keeps_quarterly_and_annual_estimates() -> None:
     class Instrument:
         def get_calendar(self):
@@ -164,3 +203,31 @@ def test_live_analyst_snapshot_keeps_quarterly_and_annual_estimates() -> None:
     assert snapshot["annual_consensus_eps"] == 6.5
     assert snapshot["consensus_revenue"] == 25.0
     assert snapshot["annual_consensus_revenue"] == 110.0
+
+
+def test_historical_yahoo_schema_accepts_revenue_consensus_when_available() -> None:
+    class Instrument:
+        def get_earnings_dates(self, limit=100):
+            frame = pd.DataFrame({
+                "EPS Estimate": [1.5],
+                "Reported EPS": [1.6],
+                "Surprise(%)": [6.67],
+                "Revenue Estimate": [25.0],
+                "Reported Revenue": [26.0],
+            }, index=[pd.Timestamp("2025-01-01", tz="UTC")])
+            frame.index.name = "Earnings Date"
+            return frame
+
+    class FakeYFinance:
+        @staticmethod
+        def Ticker(ticker):
+            return Instrument()
+
+    provider = YahooFinanceProvider.__new__(YahooFinanceProvider)
+    provider.yf = FakeYFinance()
+
+    history = provider.historical_earnings("TEST")
+
+    assert history.loc[0, "consensus_eps"] == 1.5
+    assert history.loc[0, "consensus_revenue"] == 25.0
+    assert history.loc[0, "actual_revenue_yahoo"] == 26.0

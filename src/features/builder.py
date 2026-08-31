@@ -6,7 +6,12 @@ import numpy as np
 import pandas as pd
 
 from src.logging_utils import log
-from .analyst import aligned_actual_eps, historical_eps_features, historical_surprise_features
+from .analyst import (
+    aligned_actual_eps,
+    enrich_historical_consensus,
+    historical_eps_features,
+    historical_surprise_features,
+)
 from .fundamentals import infer_next_statement_type, point_in_time_fundamentals, safe_divide
 from .market import event_returns, market_features
 
@@ -45,7 +50,8 @@ class EventDatasetBuilder:
 
     def build(self, fundamentals: pd.DataFrame, earnings: pd.DataFrame, prices: pd.DataFrame) -> pd.DataFrame:
         rows: list[dict] = []
-        for ticker, company_events in earnings.groupby("ticker"):
+        enriched_earnings = enrich_historical_consensus(earnings)
+        for ticker, company_events in enriched_earnings.groupby("ticker"):
             company_fundamentals = fundamentals.loc[fundamentals["ticker"] == ticker]
             company_prices = prices.loc[
                 prices["ticker"].isin([ticker, self.benchmark])
@@ -70,6 +76,16 @@ class EventDatasetBuilder:
                     row["quarterly_consensus_revenue"] = row.get("consensus_revenue", np.nan)
                     row["consensus_eps"] = row.get("annual_consensus_eps", np.nan)
                     row["consensus_revenue"] = row.get("annual_consensus_revenue", np.nan)
+                    row["consensus_eps_source"] = row.get("annual_consensus_eps_source", "missing")
+                    row["consensus_revenue_source"] = row.get("annual_consensus_revenue_source", "missing")
+                row["consensus_eps_available"] = float(pd.notna(row.get("consensus_eps")))
+                row["consensus_revenue_available"] = float(pd.notna(row.get("consensus_revenue")))
+                row["consensus_eps_is_derived"] = float(
+                    str(row.get("consensus_eps_source", "")).startswith("derived_")
+                )
+                row["consensus_revenue_is_derived"] = float(
+                    str(row.get("consensus_revenue_source", "")).startswith("derived_")
+                )
                 row.update(features)
                 row.update(historical_eps_features(company_events, event_date, statement_type))
                 row.update(historical_surprise_features(company_events, event_date))
