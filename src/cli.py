@@ -14,6 +14,7 @@ from src.data.collector import collect_data
 from src.data.dataset import build_dataset
 from src.logging_utils import configure_logging, log
 from src.models.training import evaluate_project, train_project
+from src.models.ticker_forecast import run_ticker_forecast
 from src.scanner import scan_upcoming
 
 
@@ -78,6 +79,10 @@ def parser() -> argparse.ArgumentParser:
     scan = commands.add_parser("scan", help="Rank upcoming earnings events")
     scan.add_argument("--days", type=int, default=14)
     scan.add_argument("--top", type=int, default=20)
+    forecast = commands.add_parser(
+        "forecast", help="Train, backtest, and forecast the next statement for one ticker"
+    )
+    forecast.add_argument("ticker", help="US ticker symbol, for example AAPL")
     commands.add_parser("tui", help="Open the interactive terminal application")
     commands.add_parser("status", help="Show local data and model status")
     return root
@@ -115,6 +120,8 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(metrics, indent=2, default=str))
     elif args.command == "scan":
         _print_frame(scan_upcoming(config, args.days, args.top))
+    elif args.command == "forecast":
+        print(json.dumps(run_ticker_forecast(args.ticker, config).to_dict(), indent=2))
     elif args.command == "status":
         status(config)
     elif args.command == "tui":

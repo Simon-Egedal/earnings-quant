@@ -9,6 +9,12 @@ sec:
   requests_per_second: 5
   cache_days: 7
 
+alpha_vantage:
+  # Obtain a free key from https://www.alphavantage.co/support/#api-key and
+  # store it in this environment variable. Never commit the key itself.
+  api_key_env: ALPHA_VANTAGE_API_KEY
+  cache_days: 7
+
 universe:
   source: sp500
   target_size: 100
@@ -26,6 +32,14 @@ model:
   reaction_target: abnormal_return_3d
   minimum_train_rows: 100
   random_seed: 42
+
+# Ticker-first model search. Accuracy is 1 - weighted absolute percentage
+# error on chronological, unseen quarters and is always reported from 0 to 1.
+ticker_model:
+  history_years: 10
+  minimum_accuracy: 0.8
+  minimum_train_quarters: 8
+  backtest_quarters: 8
 
 walk_forward:
   first_train_year: 2016

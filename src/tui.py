@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 from pathlib import Path
 
@@ -10,13 +9,10 @@ from rich.text import Text
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Select, Static
+from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Static
 
 from src.config import ensure_directories, load_config
-from src.scanner import get_upcoming_calendar, scan_events
-
-
-DAY_OPTIONS = (("Next 7 days", 7), ("Next 14 days", 14), ("Next 30 days", 30), ("Next 60 days", 60))
+from src.models.ticker_forecast import TARGETS, TARGET_LABELS, TickerForecastResult, run_ticker_forecast
 
 
 def _as_float(value: object) -> float | None:
@@ -47,362 +43,186 @@ def format_percent(value: object) -> str:
     return "-" if number is None else f"{number:+.1%}"
 
 
+def format_score(value: object) -> str:
+    number = _as_float(value)
+    return "-" if number is None else f"{number:.3f} ({number:.1%})"
+
+
 def parse_tickers(value: str) -> list[str]:
     normalized = value.replace(",", " ").split()
     return list(dict.fromkeys(ticker.strip().upper() for ticker in normalized if ticker.strip()))
 
 
 def financial_comparison_rows(row: pd.Series) -> list[tuple[str, str, str]]:
-    """Format the latest matching statement beside the model forecast."""
+    """Retained as a small public formatting helper for existing callers."""
     return [
         ("EPS", format_number(row.get("lag_eps_diluted")), format_number(row.get("predicted_eps"))),
-        (
-            "Revenue",
-            format_large_number(row.get("lag_revenue")),
-            format_large_number(row.get("predicted_revenue")),
-        ),
-        (
-            "Operating margin",
-            format_percent(row.get("lag_operating_margin")),
-            format_percent(row.get("predicted_operating_margin")),
-        ),
-        (
-            "Free cash flow",
-            format_large_number(row.get("lag_free_cash_flow")),
-            format_large_number(row.get("predicted_fcf")),
-        ),
+        ("Revenue", format_large_number(row.get("lag_revenue")), format_large_number(row.get("predicted_revenue"))),
+        ("Operating margin", format_percent(row.get("lag_operating_margin")), format_percent(row.get("predicted_operating_margin"))),
+        ("Free cash flow", format_large_number(row.get("lag_free_cash_flow")), format_large_number(row.get("predicted_fcf"))),
     ]
+
+
+def _format_metric(metric: str, value: object) -> str:
+    if metric in {"revenue", "free_cash_flow"}:
+        return format_large_number(value)
+    if metric == "operating_margin":
+        return format_percent(value)
+    return format_number(value)
 
 
 class EarningsQuantApp(App[None]):
-    """Keyboard-driven UI for selecting and scoring upcoming earnings events."""
+    """Ticker-first model search and next-statement forecasting UI."""
 
     TITLE = "Earnings Quant"
-    SUB_TITLE = "Upcoming statement growth and reaction scanner"
-    BINDINGS = [
-        ("q", "quit", "Quit"),
-        ("r", "refresh_calendar", "Refresh"),
-        ("ctrl+s", "scan_selected", "Analyze"),
-    ]
+    SUB_TITLE = "10-year ticker model and next-statement forecast"
+    BINDINGS = [("q", "quit", "Quit"), ("ctrl+s", "analyze", "Analyze")]
     CSS = """
-    Screen {
-        background: #07111f;
-        color: #d7e3f4;
-    }
-    Header {
-        background: #0b1e33;
-        color: #f4c95d;
-    }
-    #body {
-        padding: 1 2;
-    }
-    #intro {
-        color: #8ba6c6;
-        margin-bottom: 1;
-    }
-    #controls {
-        height: 3;
-        margin-bottom: 1;
-    }
-    #ticker-input {
-        width: 28;
-        margin-right: 1;
-    }
-    #days-select {
-        width: 22;
-        margin-right: 1;
-    }
-    Button {
-        margin-right: 1;
-        min-width: 16;
-    }
-    #status {
-        height: 2;
-        color: #8ba6c6;
-    }
-    .section-title {
-        color: #f4c95d;
-        text-style: bold;
-        margin-top: 1;
-    }
-    #calendar-table {
-        height: 1fr;
-        min-height: 8;
-        border: round #24496b;
-    }
-    #results-table {
-        height: 12;
-        min-height: 8;
-        border: round #2d8b71;
-    }
-    #financial-comparison {
-        height: 7;
-        min-height: 7;
-        border: round #24496b;
-    }
-    #detail {
-        min-height: 2;
-        padding: 0 1;
-        color: #a9bed5;
-    }
-    #disclaimer {
-        height: 2;
-        color: #6f87a3;
-        text-style: italic;
-    }
-    DataTable > .datatable--cursor {
-        background: #1c4568;
-        color: white;
-    }
-    Footer {
-        background: #0b1e33;
-    }
+    Screen { background: #07111f; color: #d7e3f4; }
+    Header, Footer { background: #0b1e33; color: #f4c95d; }
+    #body { padding: 1 2; }
+    #intro { color: #8ba6c6; margin-bottom: 1; }
+    #controls { height: 3; margin-bottom: 1; }
+    #ticker-input { width: 32; margin-right: 1; }
+    #run-model { min-width: 24; }
+    #status { height: 3; color: #8ba6c6; }
+    #model-summary { height: 4; padding: 0 1; border: round #2d8b71; }
+    .section-title { color: #f4c95d; text-style: bold; margin-top: 1; }
+    #attempts-table { height: 10; min-height: 7; border: round #24496b; }
+    #forecast-table { height: 9; min-height: 7; border: round #2d8b71; }
+    #detail { min-height: 3; padding: 0 1; color: #a9bed5; }
+    #disclaimer { height: 2; color: #6f87a3; text-style: italic; }
+    DataTable > .datatable--cursor { background: #1c4568; color: white; }
     """
 
     def __init__(self, config_path: str | Path | None = None) -> None:
         super().__init__()
         self.config = load_config(config_path)
         ensure_directories(self.config)
-        self.calendar = pd.DataFrame()
-        self.results = pd.DataFrame()
-        self.model_warning = ""
+        self.result: TickerForecastResult | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with Vertical(id="body"):
             yield Static(
-                "Choose an upcoming company, then run the existing two-stage financial and price-reaction models.",
+                "Enter one ticker. The app fetches up to 10 years of SEC or Alpha Vantage fundamentals, "
+                "tries models against unseen historical quarters, and forecasts the next statement.",
                 id="intro",
             )
             with Horizontal(id="controls"):
-                yield Input(placeholder="Ticker (for example NVDA)", id="ticker-input")
-                yield Select(DAY_OPTIONS, value=14, allow_blank=False, id="days-select")
-                yield Button("Refresh calendar", id="refresh-calendar")
-                yield Button("Analyze selected", variant="success", id="run-scan")
-            yield Static("Starting…", id="status")
-            yield Label("UPCOMING EARNINGS — select a row with Enter", classes="section-title")
-            yield DataTable(id="calendar-table")
-            yield Label("FORECAST AND COMPARISON", classes="section-title")
-            yield DataTable(id="results-table")
-            yield Label("LATEST REPORTED VS MODEL FORECAST", classes="section-title")
-            yield DataTable(id="financial-comparison")
-            yield Static("Select a ticker to see forecast details.", id="detail")
-            yield Static("Research output only — this application does not place trades or provide financial advice.", id="disclaimer")
+                yield Input(placeholder="Ticker (for example AAPL)", id="ticker-input")
+                yield Button("Build, backtest & forecast", variant="success", id="run-model")
+            yield Static("Ready — enter a ticker to begin.", id="status")
+            yield Static("No model has been run yet.", id="model-summary")
+            yield Label("MODEL ATTEMPTS", classes="section-title")
+            yield DataTable(id="attempts-table")
+            yield Label("NEXT FINANCIAL STATEMENT", classes="section-title")
+            yield DataTable(id="forecast-table")
+            yield Static("A forecast is qualified only when its chronological score is at least 0.800.", id="detail")
+            yield Static("Research output only — model accuracy is not a guarantee of future results.", id="disclaimer")
         yield Footer()
 
     def on_mount(self) -> None:
-        calendar_table = self.query_one("#calendar-table", DataTable)
-        calendar_table.cursor_type = "row"
-        calendar_table.zebra_stripes = True
-        calendar_table.add_columns("Ticker", "Company", "Earnings", "Timing", "Street EPS")
-        results_table = self.query_one("#results-table", DataTable)
-        results_table.cursor_type = "row"
-        results_table.zebra_stripes = True
-        results_table.add_columns(
-            "Ticker", "Statement", "Signal", "Pred EPS", "Street EPS", "EPS YoY", "Pred revenue",
-            "Street revenue", "Revenue YoY", "Expected 3D", "P(up)", "Confidence",
-        )
-        comparison_table = self.query_one("#financial-comparison", DataTable)
-        comparison_table.zebra_stripes = True
-        comparison_table.add_columns("Metric", "Latest reported", "Model forecast")
-        model_path = Path(self.config["project"]["data_dir"]) / "models" / "model_bundle.joblib"
-        if model_path.exists():
-            metadata_path = model_path.with_name("metadata.json")
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
-            ticker_count = int(metadata.get("training_ticker_count", 0))
-            minimum = int(self.config.get("scanner", {}).get("minimum_training_tickers", 20))
-            if ticker_count < minimum:
-                self.model_warning = f"Model coverage is too small ({ticker_count}/{minimum} training tickers). Signals will be rejected."
-                self._set_status(self.model_warning, error=True)
-            else:
-                self._set_status("Model ready. Loading the upcoming earnings calendar…")
-        else:
-            self._set_status("Model missing. The calendar will load, but analysis requires: python -m src.cli train", error=True)
-        self.action_refresh_calendar()
-
-    def _days(self) -> int:
-        value = self.query_one("#days-select", Select).value
-        return int(value) if isinstance(value, int) else 14
+        attempts = self.query_one("#attempts-table", DataTable)
+        attempts.zebra_stripes = True
+        attempts.add_columns("Attempt", "Model", "Backtest score", "Result")
+        forecast = self.query_one("#forecast-table", DataTable)
+        forecast.zebra_stripes = True
+        forecast.add_columns("Metric", "Latest reported", "Model forecast", "Street consensus", "Metric score")
+        self.query_one("#ticker-input", Input).focus()
 
     def _set_status(self, message: str, *, error: bool = False) -> None:
         style = "bold #ff7b72" if error else "#8ba6c6"
         self.query_one("#status", Static).update(Text(message, style=style))
 
-    def _set_calendar_busy(self, busy: bool) -> None:
-        self.query_one("#calendar-table", DataTable).loading = busy
-        self.query_one("#refresh-calendar", Button).disabled = busy
+    def _set_busy(self, busy: bool) -> None:
+        self.query_one("#attempts-table", DataTable).loading = busy
+        self.query_one("#forecast-table", DataTable).loading = busy
+        self.query_one("#run-model", Button).disabled = busy
+        self.query_one("#ticker-input", Input).disabled = busy
 
-    def _set_scan_busy(self, busy: bool) -> None:
-        self.query_one("#results-table", DataTable).loading = busy
-        self.query_one("#financial-comparison", DataTable).loading = busy
-        self.query_one("#run-scan", Button).disabled = busy
-
-    def action_refresh_calendar(self) -> None:
-        self._set_calendar_busy(True)
-        self._set_status(f"Loading companies reporting in the next {self._days()} days…")
-        self._load_calendar(self._days())
-
-    @work(thread=True, exclusive=True, group="calendar", exit_on_error=False)
-    def _load_calendar(self, days: int) -> None:
-        try:
-            calendar = get_upcoming_calendar(self.config, days)
-        except Exception as exc:
-            self.call_from_thread(self._calendar_failed, str(exc))
-        else:
-            self.call_from_thread(self._show_calendar, calendar)
-
-    def _calendar_failed(self, message: str) -> None:
-        self._set_calendar_busy(False)
-        self._set_status(f"Could not load the earnings calendar: {message}", error=True)
-
-    def _show_calendar(self, calendar: pd.DataFrame) -> None:
-        self.calendar = calendar.reset_index(drop=True)
-        table = self.query_one("#calendar-table", DataTable)
-        table.clear()
-        for index, row in self.calendar.iterrows():
-            date = pd.to_datetime(row.get("earnings_date"), errors="coerce")
-            date_text = date.strftime("%Y-%m-%d %H:%M") if pd.notna(date) else "-"
-            table.add_row(
-                str(row.get("ticker", "-")),
-                str(row.get("company", "-")),
-                date_text,
-                str(row.get("timing", "-") or "-"),
-                format_number(row.get("consensus_eps")),
-                key=str(index),
-            )
-        self._set_calendar_busy(False)
-        if self.calendar.empty:
-            self._set_status("No qualifying earnings events were found for this period.")
-        else:
-            message = f"Loaded {len(self.calendar)} upcoming events. Select a row or type a ticker."
-            if self.model_warning:
-                message = f"{message} {self.model_warning}"
-            self._set_status(message, error=bool(self.model_warning))
-
-    @on(DataTable.RowSelected, "#calendar-table")
-    def _calendar_row_selected(self, event: DataTable.RowSelected) -> None:
-        if not 0 <= event.cursor_row < len(self.calendar):
-            return
-        ticker = str(self.calendar.iloc[event.cursor_row]["ticker"]).upper()
-        self.query_one("#ticker-input", Input).value = ticker
-        self._set_status(f"Selected {ticker}. Press Analyze selected or Ctrl+S.")
-
-    @on(Button.Pressed, "#refresh-calendar")
-    def _refresh_pressed(self) -> None:
-        self.action_refresh_calendar()
-
-    @on(Button.Pressed, "#run-scan")
-    def _scan_pressed(self) -> None:
-        self.action_scan_selected()
+    @on(Button.Pressed, "#run-model")
+    def _run_pressed(self) -> None:
+        self.action_analyze()
 
     @on(Input.Submitted, "#ticker-input")
     def _ticker_submitted(self) -> None:
-        self.action_scan_selected()
+        self.action_analyze()
 
-    def action_scan_selected(self) -> None:
+    def action_analyze(self) -> None:
         tickers = parse_tickers(self.query_one("#ticker-input", Input).value)
-        if not tickers:
-            self.notify("Select a calendar row or enter a ticker first.", severity="warning")
+        if len(tickers) != 1:
+            self.notify("Enter exactly one ticker.", severity="warning")
             return
-        if self.calendar.empty:
-            self.notify("Load the upcoming earnings calendar first.", severity="warning")
-            return
-        symbols = self.calendar["ticker"].astype(str).str.upper()
-        events = self.calendar.loc[symbols.isin(tickers)].copy()
-        missing = sorted(set(tickers) - set(symbols))
-        if events.empty:
-            self._set_status(
-                f"{', '.join(missing)} has no qualifying event in the selected {self._days()}-day window.",
-                error=True,
-            )
-            return
-        self._set_scan_busy(True)
-        self._set_status(f"Running SEC, analyst, market, financial, and reaction scans for {', '.join(tickers)}…")
-        self._scan_events(events, len(events))
+        ticker = tickers[0]
+        self._set_busy(True)
+        self.query_one("#attempts-table", DataTable).clear()
+        self.query_one("#forecast-table", DataTable).clear()
+        self.query_one("#model-summary", Static).update(f"{ticker}: building chronological model candidates…")
+        self._set_status(f"Loading {ticker} SEC fundamentals and backtesting model candidates…")
+        self._run_ticker(ticker)
 
-    @work(thread=True, exclusive=True, group="scan", exit_on_error=False)
-    def _scan_events(self, events: pd.DataFrame, top: int) -> None:
+    @work(thread=True, exclusive=True, group="ticker-model", exit_on_error=False)
+    def _run_ticker(self, ticker: str) -> None:
         try:
-            results = scan_events(self.config, events, top)
+            result = run_ticker_forecast(ticker, self.config)
         except Exception as exc:
-            self.call_from_thread(self._scan_failed, str(exc))
+            self.call_from_thread(self._show_failure, str(exc))
         else:
-            self.call_from_thread(self._show_results, results)
+            self.call_from_thread(self._show_result, result)
 
-    def _scan_failed(self, message: str) -> None:
-        self._set_scan_busy(False)
+    def _show_failure(self, message: str) -> None:
+        self._set_busy(False)
+        self.query_one("#model-summary", Static).update("No forecast was created.")
         self._set_status(f"Analysis failed: {message}", error=True)
+        self.query_one("#ticker-input", Input).focus()
 
-    def _show_results(self, results: pd.DataFrame) -> None:
-        self.results = results.reset_index(drop=True)
-        table = self.query_one("#results-table", DataTable)
-        table.clear()
-        for index, row in self.results.iterrows():
-            signal = str(row.get("signal", "NO_TRADE"))
-            signal_style = {
-                "LONG": "bold green", "SHORT": "bold red", "INSUFFICIENT_DATA": "bold #ff7b72",
-            }.get(signal, "bold yellow")
-            table.add_row(
-                str(row.get("ticker", "-")),
-                str(row.get("statement_type", "-")).title(),
-                Text(signal, style=signal_style),
-                format_number(row.get("predicted_eps")),
-                format_number(row.get("consensus_eps")),
-                format_percent(row.get("predicted_eps_growth_yoy")),
-                format_large_number(row.get("predicted_revenue")),
-                format_large_number(row.get("consensus_revenue")),
-                format_percent(row.get("predicted_revenue_growth_yoy")),
-                format_percent(row.get("predicted_abnormal_return_3d")),
-                format_percent(row.get("probability_up")),
-                str(row.get("confidence", "-")),
-                key=str(index),
+    def _show_result(self, result: TickerForecastResult) -> None:
+        self.result = result
+        attempts_table = self.query_one("#attempts-table", DataTable)
+        for index, attempt in enumerate(result.attempts, start=1):
+            reached = attempt.score >= result.threshold
+            attempts_table.add_row(
+                str(index), attempt.name, format_score(attempt.score),
+                Text(
+                    "QUALIFIED" if reached else f"BELOW {result.threshold:.3f}",
+                    style="bold green" if reached else "yellow",
+                ),
             )
-        self._set_scan_busy(False)
-        if self.results.empty:
-            self.query_one("#financial-comparison", DataTable).clear()
-            self.query_one("#detail", Static).update("No ticker could be scored. Check the warnings and source data.")
-            self._set_status("No forecast was produced for the selection.", error=True)
-            return
-        row = self.results.iloc[0]
-        self._populate_financial_comparison(row)
-        if row.get("data_quality") != "OK":
-            self.query_one("#detail", Static).update(
-                f"Forecast rejected: {row.get('quality_reason', 'insufficient or implausible source data')}"
+        forecast_table = self.query_one("#forecast-table", DataTable)
+        for metric in TARGETS:
+            forecast_table.add_row(
+                TARGET_LABELS[metric],
+                _format_metric(metric, result.latest_reported.get(metric)),
+                _format_metric(metric, result.predictions.get(metric)),
+                _format_metric(metric, result.consensus.get(metric)),
+                format_score(result.target_scores.get(metric)),
             )
-            self._set_status("Analysis finished, but no reliable signal could be produced.", error=True)
-            return
+        event_text = result.expected_earnings_date or "date unavailable"
+        qualification = "QUALIFIED" if result.qualified else "NOT QUALIFIED"
+        summary_style = "bold green" if result.qualified else "bold #ff7b72"
+        self.query_one("#model-summary", Static).update(Text(
+            f"{result.ticker} — {result.company}\n"
+            f"Source: {result.data_source}  |  Currency: {result.currency}  |  "
+            f"Model: {result.selected_model}  |  "
+            f"Accuracy: {format_score(result.score)}  |  "
+            f"Required: {result.threshold:.3f}  |  {qualification}",
+            style=summary_style,
+        ))
         detail = (
-            f"{row.get('ticker', '-')} {str(row.get('statement_type', '-')).title()}"
-            f" ({row.get('expected_fiscal_period', '-')}):"
-            f"  •  EPS vs street {format_percent(row.get('predicted_eps_surprise'))}"
-            f"  •  revenue vs street {format_percent(row.get('predicted_revenue_surprise'))}"
+            f"History checked: {result.history_start} to {result.history_end} "
+            f"({result.history_periods} quarters). Next expected statement: "
+            f"{result.expected_fiscal_period}, {event_text}."
         )
+        if result.warning:
+            detail += f" {result.warning}"
         self.query_one("#detail", Static).update(detail)
-        self._set_status(f"Analysis complete for {len(results)} event(s).")
-
-    @on(DataTable.RowSelected, "#results-table")
-    def _result_row_selected(self, event: DataTable.RowSelected) -> None:
-        if not 0 <= event.cursor_row < len(self.results):
-            return
-        row = self.results.iloc[event.cursor_row]
-        self._populate_financial_comparison(row)
-        if row.get("data_quality") != "OK":
-            self.query_one("#detail", Static).update(
-                f"Forecast rejected: {row.get('quality_reason', 'insufficient or implausible source data')}"
-            )
-            return
-        self.query_one("#detail", Static).update(
-            f"{row.get('ticker', '-')} {str(row.get('statement_type', '-')).title()}"
-            f" ({row.get('expected_fiscal_period', '-')}):"
-            f"  •  EPS vs street {format_percent(row.get('predicted_eps_surprise'))}"
-            f"  •  revenue vs street {format_percent(row.get('predicted_revenue_surprise'))}"
+        self._set_busy(False)
+        self._set_status(
+            f"Finished {len(result.attempts)} model attempt(s). Best score: {result.score:.3f}.",
+            error=not result.qualified,
         )
-
-    def _populate_financial_comparison(self, row: pd.Series) -> None:
-        comparison = self.query_one("#financial-comparison", DataTable)
-        comparison.clear()
-        for metric, reported, forecast in financial_comparison_rows(row):
-            comparison.add_row(metric, reported, forecast)
+        self.query_one("#ticker-input", Input).focus()
 
 
 def main(argv: list[str] | None = None) -> int:

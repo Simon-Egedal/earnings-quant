@@ -64,6 +64,25 @@ class YahooFinanceProvider:
         log("SCAN", "%d companies reporting within %d days", len(frame), days)
         return frame.drop_duplicates(["ticker", "earnings_date"]).reset_index(drop=True)
 
+    def next_earnings_event(self, ticker: str) -> pd.Timestamp | None:
+        """Return the next company earnings date without scanning a market calendar."""
+        calendar = self.yf.Ticker(ticker).get_calendar()
+        if calendar is None:
+            return None
+        value = calendar.get("Earnings Date")
+        if value is None:
+            value = calendar.get("EarningsDate")
+        if isinstance(value, (list, tuple, pd.Index)):
+            values = list(value)
+        else:
+            values = [value]
+        dates = pd.to_datetime(pd.Series(values), utc=True, errors="coerce").dropna()
+        if dates.empty:
+            return None
+        now = pd.Timestamp.now(tz="UTC").normalize()
+        future = dates.loc[dates >= now]
+        return pd.Timestamp(future.min() if not future.empty else dates.max())
+
     def historical_earnings(self, ticker: str, limit: int = 100) -> pd.DataFrame:
         frame = self.yf.Ticker(ticker).get_earnings_dates(limit=min(limit, 100))
         if frame is None or frame.empty:

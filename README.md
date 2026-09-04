@@ -71,34 +71,60 @@ sec:
 
 The SEC asks automated clients to declare a User-Agent and currently caps automated access at 10 requests per second. The default project limit is a conservative 5 requests per second. Company Facts endpoints require no API key.
 
+### Free global fundamentals fallback
+
+The ticker-first forecaster uses SEC Company Facts for covered US filers and automatically falls back to Alpha Vantage for international symbols. Request a free key at [Alpha Vantage](https://www.alphavantage.co/support/#api-key), then set it for the current PowerShell session before starting the app:
+
+```powershell
+$env:ALPHA_VANTAGE_API_KEY="your-key-here"
+python -m src.cli tui
+```
+
+Alternatively, create the ignored `.env` file in the project root:
+
+```dotenv
+ALPHA_VANTAGE_API_KEY=your-key-here
+```
+
+To save the key for future terminals on Windows, run the following once, then open a new PowerShell window:
+
+```powershell
+setx ALPHA_VANTAGE_API_KEY "your-key-here"
+```
+
+Do not put the key in `config.yaml` or commit it. Alpha Vantage responses are cached under `data/cache/alpha_vantage`; a new international ticker normally uses five requests (symbol search plus four fundamental endpoints), while repeated runs use the cache. The free plan currently allows 25 requests per day. Coverage and history vary by company, so the app still verifies that enough quarterly observations exist before backtesting.
+
 ## Workflow
 
 ### Interactive terminal application
 
-After collecting data, building the dataset, and training the models, open the keyboard-driven TUI:
+Open the keyboard-driven TUI:
 
 ```powershell
 python -m src.cli tui
 ```
 
-The application loads the upcoming earnings calendar. Use the arrow keys and `Enter` to select a company (or type its ticker), then choose **Analyze selected**. The forecast table compares the model with analyst consensus and shows:
+Enter one ticker and choose **Build, backtest & forecast** (or press `Enter`). The application then:
 
-- predicted EPS and year-over-year EPS growth;
-- predicted revenue and year-over-year revenue growth;
-- predicted operating margin and free cash flow;
-- EPS/revenue differences versus analyst consensus;
-- expected abnormal three-session return, probability of an up move, confidence, and signal.
+- downloads the company's SEC fundamentals and keeps the latest 10 years of quarterly statements;
+- builds lagged, company-specific features without using the quarter being predicted;
+- tries a seasonal baseline, linear and regularized models, tree ensembles, and gradient boosting;
+- backtests each candidate chronologically on unseen later quarters;
+- reports a composite accuracy from `0` to `1` (the mean of per-metric `1 - weighted absolute percentage error` scores), where `1` is an exact backtest and `0` means aggregate absolute error was at least as large as the reported values;
+- stops when a candidate reaches `0.800`, or reports the best candidate after the finite candidate list is exhausted;
+- forecasts next-quarter EPS, revenue, operating margin, and free cash flow and displays analyst consensus when available.
 
-Use `R` to refresh the calendar, `Ctrl+S` to analyze, and `Q` to quit. The TUI calls the same scanner and trained model bundle as the existing `scan` command; it does not retrain or change model logic while analyzing a ticker.
+The score comes only from out-of-sample historical predictions, not model fit. If no candidate reaches `0.800`, the forecast remains visible for research but is marked **NOT QUALIFIED**. This bounded behavior avoids an infinite retry loop when a company's history cannot support the requested accuracy. Use `Ctrl+S` to analyze and `Q` to quit.
 
-For first-time setup:
+The same ticker-first flow is available without the UI:
 
 ```powershell
-python -m src.cli collect
-python -m src.cli build-dataset
-python -m src.cli train
-python -m src.cli tui
+python -m src.cli forecast AAPL
 ```
+
+Each run saves its selected estimator and backtest audit under `data/models/tickers/<TICKER>/`. Configure the history window, threshold, training minimum, and backtest length under `ticker_model` in `config.yaml`.
+
+The original cross-company event-reaction research workflow remains available through `collect`, `build-dataset`, `train`, `evaluate`, `backtest`, and `scan`.
 
 For a quick development run:
 
